@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Don Beyer Sponsored Bills</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Don Beyer: Sponsored Bills</h1>
+      <p class="sub">
+        Pulls the latest sponsored legislation from Congress.gov and groups bill titles into
+        a handful of higher-level themes.
+      </p>
+      <div class="timeline">
+        <div class="timeline-inner">
+          <div id="ticks" class="ticks"></div>
+          <div id="sessions" class="sessions"></div>
+        </div>
+      </div>
+      <div class="controls">
+        <input id="bioguide" value="B001292" aria-label="Bioguide ID" />
+        <button id="load">Load Bills</button>
+      </div>
+      <div id="status" class="summary">Ready.</div>
+    </header>
+
+    <main>
+      <div id="grid" class="grid"></div>
+      <div id="raw" class="muted"></div>
+    </main>
+
+    <script type="module" src="site.js"></script>
+  </body>
+</html>

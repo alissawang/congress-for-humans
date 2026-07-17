@@ -1,0 +1,7 @@
+name = "congress-api-cache"
+main = "src/worker.js"
+compatibility_date = "2024-09-23"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "096228c852ea492fadd95031a28b5e9d"

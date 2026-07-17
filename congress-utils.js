@@ -1,17 +1,15 @@
-const CONGRESS_API_KEY = "DZFgdKtmBuYdw7GXAMWpaPJ4IgoOmSmh0cDxLKFP";
-const BASE_URL = "https://api.congress.gov/v3";
+const WORKER_URL = "https://congress-api-cache.alissa-wang.workers.dev";
 
 import { coerceList } from "./utils.js";
 
 async function getJson(path, params = {}) {
-  const url = new URL(`${BASE_URL}/${path.replace(/^\/+/, "")}`);
-  url.searchParams.set("api_key", CONGRESS_API_KEY);
-  url.searchParams.set("format", "json");
+  const url = new URL(WORKER_URL);
+  url.searchParams.set("path", path.replace(/^\/+/, ""));
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
   }
 
-  const res = await fetch(url, { headers: { "User-Agent": "congressgov-bills/1.0" } });
+  const res = await fetch(url);
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`HTTP ${res.status} ${res.statusText} | ${body.slice(0, 300)}`);

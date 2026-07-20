@@ -23,7 +23,14 @@ function buildInternalUrl(path, paramsObj) {
   return url;
 }
 
-async function fetchCongressJson(path, paramsObj, env) {
+const MAX_UPSTREAM_RETRIES = 4;
+const RETRY_BASE_DELAY_MS = 500;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchCongressJson(path, paramsObj, env, { ttlSeconds } = {}) {
   const cacheKey = getCacheKey(buildInternalUrl(path, paramsObj));
   const cached = await env.CACHE.get(cacheKey);
   if (cached) return JSON.parse(cached);
@@ -38,20 +45,34 @@ async function fetchCongressJson(path, paramsObj, env) {
     if (v !== undefined && v !== null) upstreamUrl.searchParams.set(k, String(v));
   }
 
-  const res = await fetch(upstreamUrl, { headers: { "User-Agent": "congressgov-bills/1.0" } });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`Congress API ${res.status}: ${text.slice(0, 200)}`);
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(upstreamUrl, { headers: { "User-Agent": "congressgov-bills/1.0" } });
+    if (res.ok) {
+      const text = await res.text();
+      const putOptions = ttlSeconds != null ? { expirationTtl: ttlSeconds } : undefined;
+      await env.CACHE.put(cacheKey, text, putOptions);
+      return JSON.parse(text);
+    }
 
-  await env.CACHE.put(cacheKey, text, { expirationTtl: DEFAULT_TTL_SECONDS });
-  return JSON.parse(text);
+    const text = await res.text();
+    const retryable = (res.status === 429 || res.status >= 500) && attempt < MAX_UPSTREAM_RETRIES;
+    if (!retryable) throw new Error(`Congress API ${res.status}: ${text.slice(0, 200)}`);
+
+    const retryAfterSecs = Number(res.headers.get("retry-after"));
+    const backoffMs = Number.isFinite(retryAfterSecs) && retryAfterSecs > 0
+      ? retryAfterSecs * 1000
+      : RETRY_BASE_DELAY_MS * 2 ** attempt;
+    console.error(`Congress API ${res.status} on ${path} (attempt ${attempt + 1}); retrying in ${backoffMs}ms`);
+    await sleep(backoffMs + Math.random() * backoffMs * 0.25);
+  }
 }
 
-async function paginateCongress(path, paramsObj, env, extractItems) {
+async function paginateCongress(path, paramsObj, env, extractItems, { ttlSeconds } = {}) {
   let offset = 0;
   const limit = 250;
   const out = [];
   while (true) {
-    const page = await fetchCongressJson(path, { ...paramsObj, offset, limit }, env);
+    const page = await fetchCongressJson(path, { ...paramsObj, offset, limit }, env, { ttlSeconds });
     out.push(...extractItems(page));
     if (!page?.pagination?.next) break;
     offset += limit;
@@ -59,7 +80,9 @@ async function paginateCongress(path, paramsObj, env, extractItems) {
   return out;
 }
 
-const MEMBER_FETCH_CONCURRENCY = 40;
+const MEMBER_FETCH_CONCURRENCY = 8;
+const CURRENT_CONGRESS_REFRESH_SECONDS = 60 * 60 * 6; // 6 hours
+const REVALIDATE_LOCK_TTL_SECONDS = 60 * 15; // 15 min best-effort lock
 
 async function mapWithConcurrency(items, limit, fn) {
   let nextIndex = 0;
@@ -81,7 +104,88 @@ function wasInHouse(member, startYear, endYear) {
   );
 }
 
-async function handleBillCounts(url, env) {
+function isCurrentCongressSession(startYear, endYear) {
+  const nowYear = new Date().getFullYear();
+  return startYear <= nowYear && (endYear == null || endYear >= nowYear);
+}
+
+async function computeBillCounts(congressNum, env) {
+  // Session start/end years are immutable regardless of whether the congress is
+  // still active, so this lookup is always cached forever (no ttlSeconds).
+  const session = await fetchCongressJson(`congress/${congressNum}`, {}, env);
+  const sessionStart = session.congress.startYear;
+  const sessionEnd = session.congress.endYear;
+  const isCurrent = isCurrentCongressSession(sessionStart, sessionEnd);
+  const rawTtl = isCurrent ? CURRENT_CONGRESS_REFRESH_SECONDS : undefined;
+
+  const members = await paginateCongress(
+    `member/congress/${congressNum}`,
+    {},
+    env,
+    (page) => page.members ?? [],
+    { ttlSeconds: rawTtl }
+  );
+  const activeHouseMembers = members.filter((m) => wasInHouse(m, sessionStart, sessionEnd));
+
+  const policyAreaCounts = {};
+  let failedMembers = 0;
+  await mapWithConcurrency(activeHouseMembers, MEMBER_FETCH_CONCURRENCY, async (member) => {
+    try {
+      const bills = await paginateCongress(
+        `member/${member.bioguideId}/sponsored-legislation`,
+        {},
+        env,
+        (page) => page.sponsoredLegislation ?? page.results ?? page.items ?? [],
+        { ttlSeconds: rawTtl }
+      );
+      for (const bill of bills) {
+        if (bill.congress !== congressNum || !bill.title) continue;
+        const name = bill.policyArea?.name ?? "Other";
+        policyAreaCounts[name] = (policyAreaCounts[name] ?? 0) + 1;
+      }
+    } catch (err) {
+      failedMembers++;
+      console.error(`sponsored-legislation fetch failed for member ${member.bioguideId}: ${err.message}`);
+    }
+  });
+
+  return { policyAreaCounts, failedMembers, activeMemberCount: activeHouseMembers.length };
+}
+
+async function persistBillCountsIfComplete(congressNum, env, cacheKey, result) {
+  // Only cache a complete result — caching a partial (some members failed) result
+  // would lock in an undercount, since later requests would be served straight
+  // from cache instead of recomputing.
+  if (result.failedMembers === 0) {
+    const entry = JSON.stringify({ counts: result.policyAreaCounts, computedAt: Date.now() });
+    // No expirationTtl, ever: past-congress data is immutable, and current-congress
+    // staleness is judged by `computedAt` on read, not by KV expiry — we always
+    // want something in cache to serve.
+    await env.CACHE.put(cacheKey, entry);
+  } else {
+    console.error(
+      `bill-counts for congress ${congressNum}: ${result.failedMembers}/${result.activeMemberCount} member fetches failed; not caching`
+    );
+  }
+}
+
+async function revalidateBillCounts(congressNum, env, cacheKey, lockKey) {
+  // Best-effort de-dup only — Workers KV has no atomic compare-and-swap, so two
+  // requests can both read "no lock" and both proceed. Acceptable here given low
+  // traffic; both racing writers still go through the failedMembers===0 gate above.
+  const lockHeld = await env.CACHE.get(lockKey);
+  if (lockHeld) return;
+  await env.CACHE.put(lockKey, "1", { expirationTtl: REVALIDATE_LOCK_TTL_SECONDS });
+
+  try {
+    const result = await computeBillCounts(congressNum, env);
+    await persistBillCountsIfComplete(congressNum, env, cacheKey, result);
+  } catch (err) {
+    console.error(`background revalidation failed for congress ${congressNum}: ${err.message}`);
+  }
+}
+
+async function handleBillCounts(url, env, ctx) {
   const congressNum = Number(url.searchParams.get("congress"));
   if (!Number.isInteger(congressNum) || congressNum <= 0) {
     return new Response("Missing or invalid congress query parameter", {
@@ -91,52 +195,57 @@ async function handleBillCounts(url, env) {
   }
 
   const cacheKey = `bill-counts:${congressNum}`;
-  const cached = await env.CACHE.get(cacheKey);
-  if (cached) {
-    return new Response(cached, {
+  const lockKey = `bill-counts-lock:${congressNum}`;
+  const cachedRaw = await env.CACHE.get(cacheKey);
+
+  if (cachedRaw) {
+    const parsed = JSON.parse(cachedRaw);
+    // Entries written before the {counts, computedAt} wrapper was introduced are a
+    // flat {policyArea: count} object with no `.counts` property — treat those as
+    // maximally stale so they get revalidated into the new format in the background,
+    // instead of serving `undefined` as the response body.
+    const legacyFormat = parsed.counts === undefined;
+    const counts = legacyFormat ? parsed : parsed.counts;
+    const computedAt = legacyFormat ? 0 : parsed.computedAt;
+
+    let stale = legacyFormat;
+    try {
+      const session = await fetchCongressJson(`congress/${congressNum}`, {}, env);
+      const isCurrent = isCurrentCongressSession(session.congress.startYear, session.congress.endYear);
+      const ageSeconds = (Date.now() - computedAt) / 1000;
+      stale = stale || (isCurrent && ageSeconds > CURRENT_CONGRESS_REFRESH_SECONDS);
+    } catch (err) {
+      // Don't let a staleness-check hiccup jeopardize serving the cached value.
+      console.error(`current-congress check failed for congress ${congressNum}: ${err.message}`);
+    }
+
+    if (stale) {
+      ctx.waitUntil(revalidateBillCounts(congressNum, env, cacheKey, lockKey));
+    }
+
+    return new Response(JSON.stringify(counts), {
       status: 200,
-      headers: { "content-type": "application/json", "x-cache": "hit", ...CORS_HEADERS },
+      headers: {
+        "content-type": "application/json",
+        "x-cache": "hit",
+        ...(stale ? { "x-cache-status": "stale" } : {}),
+        ...CORS_HEADERS,
+      },
     });
   }
 
   try {
-    const members = await paginateCongress(
-      `member/congress/${congressNum}`,
-      {},
-      env,
-      (page) => page.members ?? []
-    );
+    const result = await computeBillCounts(congressNum, env);
+    await persistBillCountsIfComplete(congressNum, env, cacheKey, result);
 
-    const session = await fetchCongressJson(`congress/${congressNum}`, {}, env);
-    const sessionStart = session.congress.startYear;
-    const sessionEnd = session.congress.endYear;
-    const activeHouseMembers = members.filter((m) => wasInHouse(m, sessionStart, sessionEnd));
-
-    const policyAreaCounts = {};
-    await mapWithConcurrency(activeHouseMembers, MEMBER_FETCH_CONCURRENCY, async (member) => {
-      try {
-        const bills = await paginateCongress(
-          `member/${member.bioguideId}/sponsored-legislation`,
-          {},
-          env,
-          (page) => page.sponsoredLegislation ?? page.results ?? page.items ?? []
-        );
-        for (const bill of bills) {
-          if (bill.congress !== congressNum || !bill.title) continue;
-          const name = bill.policyArea?.name ?? "Other";
-          policyAreaCounts[name] = (policyAreaCounts[name] ?? 0) + 1;
-        }
-      } catch {
-        // skip members whose sponsored-legislation fetch failed; a retry will pick them up
-      }
-    });
-
-    const responseText = JSON.stringify(policyAreaCounts);
-    await env.CACHE.put(cacheKey, responseText, { expirationTtl: DEFAULT_TTL_SECONDS });
-
-    return new Response(responseText, {
+    return new Response(JSON.stringify(result.policyAreaCounts), {
       status: 200,
-      headers: { "content-type": "application/json", "x-cache": "miss", ...CORS_HEADERS },
+      headers: {
+        "content-type": "application/json",
+        "x-cache": "miss",
+        ...(result.failedMembers > 0 ? { "x-partial-failures": String(result.failedMembers) } : {}),
+        ...CORS_HEADERS,
+      },
     });
   } catch (err) {
     return new Response(`Failed to compute bill counts: ${err.message}`, {
@@ -147,41 +256,75 @@ async function handleBillCounts(url, env) {
 }
 
 const SUMMARIZE_BATCH_SIZE = 20;
+const MAX_SUMMARY_RETRIES = 4;
+const SUMMARY_RETRY_BASE_DELAY_MS = 500;
+const SUMMARY_BATCH_CONCURRENCY = 4;
 
 async function summarizeBatch(batch, apiKey) {
   const lines = batch.map((b, i) => `[${i}] ${b.text}`);
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 4096,
-      messages: [
-        {
-          role: "user",
-          content:
-            lines.join("\n") +
-            '\n\nSummarize each bill in one sentence in the format "[goal of bill] by [mechanism]." Return a JSON object where each key is the bill\'s index number (as a string) and each value is its one-sentence summary.',
-        },
-      ],
-    }),
+  const body = JSON.stringify({
+    model: "claude-sonnet-4-6",
+    max_tokens: 4096,
+    messages: [
+      {
+        role: "user",
+        content:
+          lines.join("\n") +
+          '\n\nSummarize each bill in one sentence in the format "[goal of bill] by [mechanism]." Return a JSON object where each key is the bill\'s index number (as a string) and each value is its one-sentence summary.',
+      },
+    ],
   });
 
-  if (!res.ok) return {};
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body,
+    });
 
-  const data = await res.json();
-  const text = data.content?.[0]?.text || "";
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) return {};
+    if (res.ok) {
+      const data = await res.json();
+      const text = data.content?.[0]?.text || "";
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      const parsed = jsonMatch ? tryParseJson(jsonMatch[0]) : null;
+      if (parsed) return parsed;
 
+      // Claude's output is non-deterministic, so an unparseable completion is worth retrying.
+      if (attempt >= MAX_SUMMARY_RETRIES) {
+        console.error(`summarizeBatch: unparseable completion after ${attempt + 1} attempt(s), giving up. Raw text: ${text.slice(0, 200)}`);
+        return {};
+      }
+      const backoffMs = SUMMARY_RETRY_BASE_DELAY_MS * 2 ** attempt;
+      console.error(`summarizeBatch: unparseable completion (attempt ${attempt + 1}); retrying in ${backoffMs}ms`);
+      await sleep(backoffMs + Math.random() * backoffMs * 0.25);
+      continue;
+    }
+
+    const text = await res.text();
+    const retryable = (res.status === 429 || res.status >= 500) && attempt < MAX_SUMMARY_RETRIES;
+    if (!retryable) {
+      console.error(`summarizeBatch: Anthropic API ${res.status} after ${attempt + 1} attempt(s), giving up: ${text.slice(0, 200)}`);
+      return {};
+    }
+
+    const retryAfterSecs = Number(res.headers.get("retry-after"));
+    const backoffMs = Number.isFinite(retryAfterSecs) && retryAfterSecs > 0
+      ? retryAfterSecs * 1000
+      : SUMMARY_RETRY_BASE_DELAY_MS * 2 ** attempt;
+    console.error(`summarizeBatch: Anthropic API ${res.status} (attempt ${attempt + 1}); retrying in ${backoffMs}ms`);
+    await sleep(backoffMs + Math.random() * backoffMs * 0.25);
+  }
+}
+
+function tryParseJson(text) {
   try {
-    return JSON.parse(jsonMatch[0]);
+    return JSON.parse(text);
   } catch {
-    return {};
+    return null;
   }
 }
 
@@ -198,7 +341,7 @@ async function handleSummarize(request, env) {
 
   const summaries = {};
   const cacheResults = await Promise.all(
-    validBills.map((b) => env.CACHE.get(`summary:${b.id}`))
+    validBills.map((b) => env.SUMMARY_CACHE.get(`summary:${b.id}`))
   );
 
   const misses = [];
@@ -222,23 +365,21 @@ async function handleSummarize(request, env) {
     }
 
     const puts = [];
-    await Promise.all(
-      batches.map(async (batch) => {
-        let summaryMap = {};
-        try {
-          summaryMap = await summarizeBatch(batch, apiKey);
-        } catch {
-          return;
-        }
-        for (const [idx, summary] of Object.entries(summaryMap)) {
-          const bill = batch[Number(idx)];
-          if (!bill) continue;
-          const summaryText = String(summary);
-          summaries[bill.id] = summaryText;
-          puts.push(env.CACHE.put(`summary:${bill.id}`, summaryText));
-        }
-      })
-    );
+    await mapWithConcurrency(batches, SUMMARY_BATCH_CONCURRENCY, async (batch) => {
+      let summaryMap = {};
+      try {
+        summaryMap = await summarizeBatch(batch, apiKey);
+      } catch {
+        return;
+      }
+      for (const [idx, summary] of Object.entries(summaryMap)) {
+        const bill = batch[Number(idx)];
+        if (!bill) continue;
+        const summaryText = String(summary);
+        summaries[bill.id] = summaryText;
+        puts.push(env.SUMMARY_CACHE.put(`summary:${bill.id}`, summaryText));
+      }
+    });
     await Promise.all(puts);
   }
 
@@ -249,7 +390,7 @@ async function handleSummarize(request, env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {
@@ -273,7 +414,7 @@ export default {
       if (request.method !== "GET") {
         return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
       }
-      return handleBillCounts(url, env);
+      return handleBillCounts(url, env, ctx);
     }
 
     if (request.method !== "GET") {

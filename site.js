@@ -271,7 +271,7 @@ function renderSessions(sessionGroups, activeKey) {
     chip.style.flex = String(s.duration || 1);
     chip.addEventListener("click", async () => {
       renderSessions(sessionGroups, s.key);
-      ui.status.textContent = `Analyzing ${s.bills.length} bills…`;
+      ui.status.textContent = `Summarizing ${s.bills.length} sponsored bills…`;
       ui.grid.innerHTML = "";
       try {
         const grouped = groupBillsByPolicyArea(s.bills);

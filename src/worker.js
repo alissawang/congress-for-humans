@@ -109,6 +109,128 @@ function isCurrentCongressSession(startYear, endYear) {
   return startYear <= nowYear && (endYear == null || endYear >= nowYear);
 }
 
+function normalizeMember(m) {
+  const lastTerm = m.terms?.item?.[m.terms.item.length - 1];
+  return {
+    bioguideId: m.bioguideId,
+    name: m.name,
+    state: m.state,
+    district: m.district ?? null,
+    partyName: m.partyName,
+    chamber: lastTerm?.chamber ?? null,
+    imageUrl: m.depiction?.imageUrl ?? null,
+  };
+}
+
+async function computeMemberRoster(congressNum, env) {
+  // Session start/end years are immutable, so this lookup is always cached forever.
+  const session = await fetchCongressJson(`congress/${congressNum}`, {}, env);
+  const isCurrent = isCurrentCongressSession(session.congress.startYear, session.congress.endYear);
+  const rawTtl = isCurrent ? CURRENT_CONGRESS_REFRESH_SECONDS : undefined;
+
+  // currentMember=false per the API docs' guidance for getting the complete
+  // roster of everyone who served in this Congress, not just those still serving.
+  const members = await paginateCongress(
+    `member/congress/${congressNum}`,
+    { currentMember: false },
+    env,
+    (page) => page.members ?? [],
+    { ttlSeconds: rawTtl }
+  );
+  return members.map(normalizeMember);
+}
+
+async function persistMemberRoster(env, cacheKey, roster) {
+  const entry = JSON.stringify({ members: roster, computedAt: Date.now() });
+  await env.CACHE.put(cacheKey, entry);
+}
+
+async function revalidateMemberRoster(congressNum, env, cacheKey, lockKey) {
+  const lockHeld = await env.CACHE.get(lockKey);
+  if (lockHeld) return;
+  await env.CACHE.put(lockKey, "1", { expirationTtl: REVALIDATE_LOCK_TTL_SECONDS });
+
+  try {
+    const roster = await computeMemberRoster(congressNum, env);
+    await persistMemberRoster(env, cacheKey, roster);
+  } catch (err) {
+    console.error(`background member-roster revalidation failed for congress ${congressNum}: ${err.message}`);
+  }
+}
+
+async function getMemberRoster(congressNum, env, ctx) {
+  const cacheKey = `member-roster:${congressNum}`;
+  const lockKey = `member-roster-lock:${congressNum}`;
+  const cachedRaw = await env.CACHE.get(cacheKey);
+
+  if (cachedRaw) {
+    const parsed = JSON.parse(cachedRaw);
+    let stale = false;
+    try {
+      const session = await fetchCongressJson(`congress/${congressNum}`, {}, env);
+      const isCurrent = isCurrentCongressSession(session.congress.startYear, session.congress.endYear);
+      stale = isCurrent && (Date.now() - parsed.computedAt) / 1000 > CURRENT_CONGRESS_REFRESH_SECONDS;
+    } catch (err) {
+      console.error(`current-congress check failed for congress ${congressNum}: ${err.message}`);
+    }
+
+    if (stale) ctx.waitUntil(revalidateMemberRoster(congressNum, env, cacheKey, lockKey));
+    return parsed.members;
+  }
+
+  const roster = await computeMemberRoster(congressNum, env);
+  await persistMemberRoster(env, cacheKey, roster);
+  return roster;
+}
+
+async function resolveCurrentCongressNumber(env) {
+  const page = await fetchCongressJson("congress", { limit: 1 }, env, { ttlSeconds: DEFAULT_TTL_SECONDS });
+  const match = page?.congresses?.[0]?.url?.match(/\/congress\/(\d+)/);
+  if (!match) throw new Error("Could not determine current Congress number");
+  return Number(match[1]);
+}
+
+function filterMembers(members, { q, state, district }) {
+  const query = q?.trim().toLowerCase();
+  const stateQuery = state?.trim().toLowerCase();
+  const districtQuery = district?.trim();
+
+  return members.filter((m) => {
+    if (query && !m.name.toLowerCase().includes(query)) return false;
+    if (stateQuery && m.state?.toLowerCase() !== stateQuery) return false;
+    if (districtQuery && String(m.district ?? "") !== districtQuery) return false;
+    return true;
+  });
+}
+
+async function handleMemberSearch(url, env, ctx) {
+  const congressParam = url.searchParams.get("congress");
+  let congressNum;
+  try {
+    congressNum = congressParam ? Number(congressParam) : await resolveCurrentCongressNumber(env);
+  } catch (err) {
+    return new Response(`Failed to resolve Congress number: ${err.message}`, { status: 502, headers: CORS_HEADERS });
+  }
+  if (!Number.isInteger(congressNum) || congressNum <= 0) {
+    return new Response("Invalid congress query parameter", { status: 400, headers: CORS_HEADERS });
+  }
+
+  try {
+    const roster = await getMemberRoster(congressNum, env, ctx);
+    const results = filterMembers(roster, {
+      q: url.searchParams.get("q"),
+      state: url.searchParams.get("state"),
+      district: url.searchParams.get("district"),
+    });
+    return new Response(JSON.stringify({ congress: congressNum, count: results.length, members: results }), {
+      status: 200,
+      headers: { "content-type": "application/json", ...CORS_HEADERS },
+    });
+  } catch (err) {
+    return new Response(`Failed to search members: ${err.message}`, { status: 502, headers: CORS_HEADERS });
+  }
+}
+
 async function computeBillCounts(congressNum, env) {
   // Session start/end years are immutable regardless of whether the congress is
   // still active, so this lookup is always cached forever (no ttlSeconds).
@@ -415,6 +537,13 @@ export default {
         return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
       }
       return handleBillCounts(url, env, ctx);
+    }
+
+    if (url.pathname === "/member-search") {
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
+      }
+      return handleMemberSearch(url, env, ctx);
     }
 
     if (request.method !== "GET") {

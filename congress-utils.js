@@ -56,4 +56,19 @@ async function countBillsByPolicyArea(congress_session_num) {
   return res.json();
 }
 
-export { getSponsoredLegislation, countBillsByPolicyArea };
+async function searchMembers({ congress, q, state, district } = {}) {
+  const url = new URL(`${WORKER_URL}/member-search`);
+  if (congress !== undefined) url.searchParams.set("congress", String(congress));
+  if (q) url.searchParams.set("q", q);
+  if (state) url.searchParams.set("state", state);
+  if (district !== undefined && district !== "") url.searchParams.set("district", String(district));
+
+  const res = await fetch(url);
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} ${res.statusText} | ${body.slice(0, 300)}`);
+  }
+  return res.json();
+}
+
+export { getSponsoredLegislation, countBillsByPolicyArea, searchMembers };

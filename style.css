@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;600;700&display=swap");
 
 :root {
   --ink: #1b1b1b;
@@ -12,9 +12,11 @@
 }
 
 body {
-  margin: 0;
+  margin: 20px;
+  margin-left: 50px;
+  margin-right: 50px;
   color: var(--ink);
-  font-family: "Nunito", "Helvetica";
+  font-family: "Public Sans", "Helvetica";
   line-height: 1.4;
 }
 
@@ -38,9 +40,9 @@ h1 {
 
 .controls {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 2fr 1fr 100px auto;
   gap: 12px;
-  max-width: 520px;
+  max-width: 720px;
 }
 
 input {
@@ -48,6 +50,45 @@ input {
   border: 1px solid var(--border);
   background: var(--panel);
   font-size: 14px;
+}
+
+.member-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-width: 720px;
+  border: 1px solid var(--border);
+  border-top: none;
+}
+
+.member-results:not([hidden]) {
+  display: block;
+}
+
+.member-results li {
+  padding: 8px 12px;
+  font-size: 14px;
+  cursor: pointer;
+  border-top: 1px solid var(--border);
+}
+
+.member-results li:first-child {
+  border-top: none;
+}
+
+.member-results li:hover,
+.member-results li.active {
+  background: var(--accent-2);
+}
+
+.member-results li .mr-name {
+  font-weight: 600;
+}
+
+.member-results li .mr-meta {
+  color: #777;
+  font-size: 12px;
+  margin-left: 6px;
 }
 
 button {
@@ -84,48 +125,12 @@ main {
   min-width: 900px;
 }
 
-.ticks {
-  display: flex;
-  flex-wrap: nowrap;
-  font-size: 10px;
-  color: #7c7468;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.tick {
-  position: relative;
-  padding-left: 10px;
-  text-align: left;
-}
-
-.tick::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 1px;
-  width: 1px;
-  height: 10px;
-  background: #d5cbbb;
-}
-
 .sessions {
   display: flex;
   flex-wrap: nowrap;
   gap: 6px;
   max-width: 980px;
-  position: relative;
   padding: 10px 0 2px;
-}
-
-.sessions::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 6px;
-  height: 1px;
-  background: linear-gradient(90deg, #dcd3c3, transparent 60%, #dcd3c3);
 }
 
 .chip {
@@ -227,7 +232,7 @@ main {
 .policy-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 20px 24px;
+  gap: 20px 30px;
 }
 
 .policy-cell {
@@ -329,6 +334,11 @@ main {
 
   .controls {
     grid-template-columns: 1fr;
+    max-width: 100%;
+  }
+
+  .member-results {
+    max-width: 100%;
   }
 
   .timeline {
@@ -340,7 +350,6 @@ main {
     padding-bottom: 4px;
   }
 
-  .ticks,
   .sessions {
     flex-wrap: nowrap;
   }

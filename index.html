@@ -3,21 +3,23 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Don Beyer Sponsored Bills</title>
+    <title>Track Your Congressmember</title>
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
     <header>
       <h1>Track Your Congressmember</h1>
+      <div class="controls">
+        <input id="member-query" placeholder="Search by name…" aria-label="Member name" autocomplete="off" />
+        <input id="member-state" placeholder="State (optional)" aria-label="State" autocomplete="off" />
+        <input id="member-district" placeholder="District (optional)" aria-label="District" autocomplete="off" inputmode="numeric" />
+        <button id="member-search-btn">Search</button>
+      </div>
+      <ul id="member-results" class="member-results" hidden></ul>
       <div class="timeline">
         <div class="timeline-inner">
-          <div id="ticks" class="ticks"></div>
           <div id="sessions" class="sessions"></div>
         </div>
-      </div>
-      <div class="controls">
-        <input id="bioguide" value="B001292" aria-label="Bioguide ID" />
-        <button id="load">Load Bills</button>
       </div>
       <div id="status" class="summary">Ready.</div>
     </header>

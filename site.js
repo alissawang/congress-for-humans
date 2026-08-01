@@ -58,7 +58,7 @@ import {
   pixelArtPositions,
 } from "./utils.js";
 import { summarizeBillsWithClaude } from "./claude-utils.js";
-import { getSponsoredLegislation, countBillsByPolicyArea } from "./congress-utils.js";
+import { getSponsoredLegislation, countBillsByPolicyArea, searchMembers } from "./congress-utils.js";
 
 function mutedColor(hex) {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -120,13 +120,15 @@ function groupBillsByPolicyArea(bills) {
 
 
 const ui = {
-  bioguide: document.getElementById("bioguide"),
-  load: document.getElementById("load"),
+  memberQuery: document.getElementById("member-query"),
+  memberState: document.getElementById("member-state"),
+  memberDistrict: document.getElementById("member-district"),
+  searchBtn: document.getElementById("member-search-btn"),
+  results: document.getElementById("member-results"),
   status: document.getElementById("status"),
   grid: document.getElementById("grid"),
   raw: document.getElementById("raw"),
   sessions: document.getElementById("sessions"),
-  ticks: document.getElementById("ticks"),
 };
 
 const SHAPED_CATEGORIES = {
@@ -267,7 +269,7 @@ function renderSessions(sessionGroups, activeKey) {
   for (const s of sessionGroups) {
     const chip = document.createElement("button");
     chip.className = `chip${s.key === activeKey ? " active" : ""}`;
-    chip.textContent = s.label;
+    chip.textContent = yearTickLabel(s.minDate, s.maxDate);
     chip.style.flex = String(s.duration || 1);
     chip.addEventListener("click", async () => {
       renderSessions(sessionGroups, s.key);
@@ -280,7 +282,7 @@ function renderSessions(sessionGroups, activeKey) {
           countBillsByPolicyArea(s.congress),
         ]);
         renderGroups(grouped, totalCounts);
-        ui.status.textContent = `Showing ${s.bills.length} bills from ${s.label}.`;
+        ui.status.textContent = `Showing bills from ${s.label}.`;
       } catch (err) {
         ui.status.textContent = `Failed to summarize: ${err.message}`;
       }
@@ -289,27 +291,12 @@ function renderSessions(sessionGroups, activeKey) {
   }
 }
 
-function renderTicks(sessionGroups) {
-  ui.ticks.innerHTML = "";
-  if (!sessionGroups.length) return;
-
-  for (const s of sessionGroups) {
-    const tick = document.createElement("div");
-    tick.className = "tick";
-    tick.textContent = yearTickLabel(s.minDate, s.maxDate);
-    tick.style.flex = String(s.duration || 1);
-    ui.ticks.appendChild(tick);
-  }
-}
-
-async function loadBills() {
-  const bioguideId = ui.bioguide.value.trim();
+async function loadBills(bioguideId) {
   if (!bioguideId) return;
   ui.status.textContent = "Loading bills…";
   ui.raw.textContent = "";
   ui.grid.innerHTML = "";
   ui.sessions.innerHTML = "";
-  ui.ticks.innerHTML = "";
 
   try {
     const bills = await getSponsoredLegislation(bioguideId);
@@ -318,7 +305,6 @@ async function loadBills() {
       duration: durationMonths(g.minDate, g.maxDate),
     }));
     const activeCongress = congressGroups[0];
-    renderTicks(congressGroups);
     renderSessions(congressGroups, activeCongress ? activeCongress.key : null);
 
     if (activeCongress) {
@@ -329,17 +315,93 @@ async function loadBills() {
         countBillsByPolicyArea(activeCongress.congress),
       ]);
       renderGroups(grouped, totalCounts);
-      ui.status.textContent = `Showing ${activeCongress.bills.length} bills from ${activeCongress.label}.`;
+      ui.status.textContent = `Showing bills from ${activeCongress.label}.`;
     } else {
       ui.status.textContent = `Found ${bills.length} sponsored bills.`;
     }
 
-    ui.raw.textContent = "Tip: click Load Bills again after changing the Bioguide ID.";
+    ui.raw.textContent = "Tip: search for another member above to load a different record.";
   } catch (err) {
     ui.status.textContent = "Failed to load bills.";
     ui.raw.textContent = String(err && err.message ? err.message : err);
   }
 }
 
-ui.load.addEventListener("click", loadBills);
-loadBills();
+let searchDebounceTimer = null;
+let latestSearchToken = 0;
+
+function clearResults() {
+  ui.results.innerHTML = "";
+  ui.results.hidden = true;
+}
+
+function renderResults(members) {
+  ui.results.innerHTML = "";
+  if (!members.length) {
+    ui.results.hidden = true;
+    return;
+  }
+  for (const m of members) {
+    const li = document.createElement("li");
+    const districtLabel =
+      m.chamber === "Senate" ? "Senate" : m.district != null ? `District ${m.district}` : "";
+    const meta = [m.state, districtLabel, m.partyName].filter(Boolean).join(" · ");
+    const nameEl = document.createElement("span");
+    nameEl.className = "mr-name";
+    nameEl.textContent = m.name;
+    const metaEl = document.createElement("span");
+    metaEl.className = "mr-meta";
+    metaEl.textContent = meta;
+    li.appendChild(nameEl);
+    li.appendChild(metaEl);
+    li.addEventListener("click", () => selectMember(m));
+    ui.results.appendChild(li);
+  }
+  ui.results.hidden = false;
+}
+
+function selectMember(member) {
+  clearResults();
+  ui.memberQuery.value = member.name;
+  loadBills(member.bioguideId);
+}
+
+async function runSearch() {
+  const q = ui.memberQuery.value.trim();
+  const state = ui.memberState.value.trim();
+  const district = ui.memberDistrict.value.trim();
+  if (!q && !state && !district) {
+    clearResults();
+    return;
+  }
+
+  const token = ++latestSearchToken;
+  try {
+    const { members } = await searchMembers({ q, state, district });
+    if (token !== latestSearchToken) return;
+    renderResults(members);
+  } catch (err) {
+    if (token !== latestSearchToken) return;
+    ui.status.textContent = `Search failed: ${err.message}`;
+    clearResults();
+  }
+}
+
+function scheduleSearch() {
+  clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(runSearch, 300);
+}
+
+ui.memberQuery.addEventListener("input", scheduleSearch);
+ui.memberState.addEventListener("input", scheduleSearch);
+ui.memberDistrict.addEventListener("input", scheduleSearch);
+ui.searchBtn.addEventListener("click", () => {
+  clearTimeout(searchDebounceTimer);
+  runSearch();
+});
+document.addEventListener("click", (e) => {
+  if (!ui.results.contains(e.target) && e.target !== ui.memberQuery) clearResults();
+});
+
+ui.memberQuery.value = "Beyer, Donald S.";
+loadBills("B001292");

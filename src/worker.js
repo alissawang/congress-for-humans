@@ -450,6 +450,123 @@ function tryParseJson(text) {
   }
 }
 
+async function generateFocusAreas(year, areas, apiKey) {
+  const sections = areas
+    .map((a) => `[${a.category}]\n` + a.bills.map((t, i) => `${i + 1}. ${t}`).join("\n"))
+    .join("\n\n");
+
+  const body = JSON.stringify({
+    model: "claude-sonnet-4-6",
+    max_tokens: 500,
+    messages: [
+      {
+        role: "user",
+        content:
+          `Here are bills a member of Congress sponsored in ${year}, grouped by policy area:\n\n${sections}\n\n` +
+          "For each policy area listed above, write a short label (a few words, not a full sentence) for " +
+          "EVERY bill listed in that area — not a generic restatement of the policy area's name. Every bill " +
+          "number must get exactly one label; do not skip any or combine multiple bills into one label. " +
+          "Each label will be displayed lowercase mid-sentence, so do NOT capitalize the first word unless " +
+          'it is a proper noun or acronym (e.g. "wildlife corridors", "AI guardrails", "Medicare cuts", ' +
+          '"ESA override"). Return a JSON object where each key is the policy area name exactly as given in ' +
+          'brackets above, and each value is an array of objects like {"bill": <the bill\'s number from the ' +
+          'list above>, "label": <short label string>}, one per bill. The shorter the better: keep each ' +
+          "label to just a few words, since all the labels for a policy area, joined with \", \", must fit " +
+          "on a single line in the UI.",
+      },
+    ],
+  });
+
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body,
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const text = data.content?.[0]?.text || "";
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      const parsed = jsonMatch ? tryParseJson(jsonMatch[0]) : null;
+      if (parsed) return parsed;
+
+      if (attempt >= MAX_SUMMARY_RETRIES) {
+        console.error(`generateFocusAreas: unparseable completion after ${attempt + 1} attempt(s), giving up. Raw text: ${text.slice(0, 200)}`);
+        return {};
+      }
+      const backoffMs = SUMMARY_RETRY_BASE_DELAY_MS * 2 ** attempt;
+      console.error(`generateFocusAreas: unparseable completion (attempt ${attempt + 1}); retrying in ${backoffMs}ms`);
+      await sleep(backoffMs + Math.random() * backoffMs * 0.25);
+      continue;
+    }
+
+    const text = await res.text();
+    const retryable = (res.status === 429 || res.status >= 500) && attempt < MAX_SUMMARY_RETRIES;
+    if (!retryable) {
+      console.error(`generateFocusAreas: Anthropic API ${res.status} after ${attempt + 1} attempt(s), giving up: ${text.slice(0, 200)}`);
+      return {};
+    }
+
+    const retryAfterSecs = Number(res.headers.get("retry-after"));
+    const backoffMs = Number.isFinite(retryAfterSecs) && retryAfterSecs > 0
+      ? retryAfterSecs * 1000
+      : SUMMARY_RETRY_BASE_DELAY_MS * 2 ** attempt;
+    console.error(`generateFocusAreas: Anthropic API ${res.status} (attempt ${attempt + 1}); retrying in ${backoffMs}ms`);
+    await sleep(backoffMs + Math.random() * backoffMs * 0.25);
+  }
+}
+
+async function handleFocusAreas(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return new Response("Invalid JSON body", { status: 400, headers: CORS_HEADERS });
+  }
+
+  const bioguideId = typeof body?.bioguideId === "string" ? body.bioguideId : "";
+  const year = Number(body?.year);
+  const areas = Array.isArray(body?.areas)
+    ? body.areas
+        .filter((a) => a && typeof a.category === "string" && Array.isArray(a.bills))
+        .map((a) => ({ category: a.category, bills: a.bills.filter((t) => typeof t === "string" && t) }))
+        .filter((a) => a.bills.length > 0)
+    : [];
+
+  if (!bioguideId || !Number.isInteger(year) || areas.length === 0) {
+    return new Response("Missing bioguideId, year, or areas", { status: 400, headers: CORS_HEADERS });
+  }
+
+  const cacheKey = `focus-areas:${bioguideId}:${year}`;
+  const cached = await env.SUMMARY_CACHE.get(cacheKey);
+  if (cached) {
+    return new Response(JSON.stringify({ areas: JSON.parse(cached) }), {
+      status: 200,
+      headers: { "content-type": "application/json", ...CORS_HEADERS },
+    });
+  }
+
+  const apiKey = env.CLAUDE_API_KEY;
+  if (!apiKey) {
+    return new Response("Missing CLAUDE_API_KEY secret", { status: 500, headers: CORS_HEADERS });
+  }
+
+  const areaTexts = await generateFocusAreas(year, areas, apiKey);
+  if (Object.keys(areaTexts).length > 0) {
+    await env.SUMMARY_CACHE.put(cacheKey, JSON.stringify(areaTexts));
+  }
+
+  return new Response(JSON.stringify({ areas: areaTexts }), {
+    status: 200,
+    headers: { "content-type": "application/json", ...CORS_HEADERS },
+  });
+}
+
 async function handleSummarize(request, env) {
   let body;
   try {
@@ -530,6 +647,13 @@ export default {
         return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
       }
       return handleSummarize(request, env);
+    }
+
+    if (url.pathname === "/focus-areas") {
+      if (request.method !== "POST") {
+        return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
+      }
+      return handleFocusAreas(request, env);
     }
 
     if (url.pathname === "/bill-counts") {

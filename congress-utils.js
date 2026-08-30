@@ -30,6 +30,11 @@ async function* paginate(path, { limit = 250, params = {}, sleepMs = 75 } = {}) 
   }
 }
 
+async function getMemberDetails(bioguideId) {
+  const { member } = await getJson(`member/${bioguideId}`);
+  return member;
+}
+
 async function getSponsoredLegislation(bioguideId) {
   const out = [];
   const listPath = `/member/${bioguideId}/sponsored-legislation`;
@@ -71,4 +76,4 @@ async function searchMembers({ congress, q, state, district } = {}) {
   return res.json();
 }
 
-export { getSponsoredLegislation, countBillsByPolicyArea, searchMembers };
+export { getMemberDetails, getSponsoredLegislation, countBillsByPolicyArea, searchMembers };

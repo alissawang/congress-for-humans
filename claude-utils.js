@@ -26,4 +26,21 @@ async function summarizeBillsWithClaude(bills) {
   }
 }
 
-export { summarizeBillsWithClaude };
+async function getFocusAreas(bioguideId, year, groups) {
+  const areas = groups.map((g) => ({
+    category: g.category,
+    bills: g.bills.map((bill) => bill.description || bill.title || makePrimaryName(bill)),
+  }));
+
+  const res = await fetch(`${WORKER_URL}/focus-areas`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bioguideId, year, areas }),
+  });
+  if (!res.ok) return {};
+
+  const { areas: areaTexts } = await res.json();
+  return areaTexts || {};
+}
+
+export { summarizeBillsWithClaude, getFocusAreas };

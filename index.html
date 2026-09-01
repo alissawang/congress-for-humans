@@ -3,27 +3,95 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Don Beyer Sponsored Bills</title>
+    <title>Track Your Congressmember</title>
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
     <header>
-      <h1>Don Beyer: Sponsored Bills</h1>
-      <p class="sub">
-        Pulls the latest sponsored legislation from Congress.gov and groups bill titles into
-        a handful of higher-level themes.
-      </p>
+      <h1>Track Your Congressmember</h1>
+      <div class="controls">
+        <input id="member-query" placeholder="Search by name…" aria-label="Member name" autocomplete="off" />
+        <select id="member-state" aria-label="State">
+          <option value="">State</option>
+          <option value="Alabama">Alabama</option>
+          <option value="Alaska">Alaska</option>
+          <option value="American Samoa">American Samoa</option>
+          <option value="Arizona">Arizona</option>
+          <option value="Arkansas">Arkansas</option>
+          <option value="California">California</option>
+          <option value="Colorado">Colorado</option>
+          <option value="Connecticut">Connecticut</option>
+          <option value="Delaware">Delaware</option>
+          <option value="District of Columbia">District of Columbia</option>
+          <option value="Florida">Florida</option>
+          <option value="Georgia">Georgia</option>
+          <option value="Guam">Guam</option>
+          <option value="Hawaii">Hawaii</option>
+          <option value="Idaho">Idaho</option>
+          <option value="Illinois">Illinois</option>
+          <option value="Indiana">Indiana</option>
+          <option value="Iowa">Iowa</option>
+          <option value="Kansas">Kansas</option>
+          <option value="Kentucky">Kentucky</option>
+          <option value="Louisiana">Louisiana</option>
+          <option value="Maine">Maine</option>
+          <option value="Maryland">Maryland</option>
+          <option value="Massachusetts">Massachusetts</option>
+          <option value="Michigan">Michigan</option>
+          <option value="Minnesota">Minnesota</option>
+          <option value="Mississippi">Mississippi</option>
+          <option value="Missouri">Missouri</option>
+          <option value="Montana">Montana</option>
+          <option value="Nebraska">Nebraska</option>
+          <option value="Nevada">Nevada</option>
+          <option value="New Hampshire">New Hampshire</option>
+          <option value="New Jersey">New Jersey</option>
+          <option value="New Mexico">New Mexico</option>
+          <option value="New York">New York</option>
+          <option value="North Carolina">North Carolina</option>
+          <option value="North Dakota">North Dakota</option>
+          <option value="Northern Mariana Islands">Northern Mariana Islands</option>
+          <option value="Ohio">Ohio</option>
+          <option value="Oklahoma">Oklahoma</option>
+          <option value="Oregon">Oregon</option>
+          <option value="Pennsylvania">Pennsylvania</option>
+          <option value="Puerto Rico">Puerto Rico</option>
+          <option value="Rhode Island">Rhode Island</option>
+          <option value="South Carolina">South Carolina</option>
+          <option value="South Dakota">South Dakota</option>
+          <option value="Tennessee">Tennessee</option>
+          <option value="Texas">Texas</option>
+          <option value="Utah">Utah</option>
+          <option value="Vermont">Vermont</option>
+          <option value="Virgin Islands">Virgin Islands</option>
+          <option value="Virginia">Virginia</option>
+          <option value="Washington">Washington</option>
+          <option value="West Virginia">West Virginia</option>
+          <option value="Wisconsin">Wisconsin</option>
+          <option value="Wyoming">Wyoming</option>
+        </select>
+        <input id="member-district" placeholder="District (optional)" aria-label="District" autocomplete="off" inputmode="numeric" />
+        <button id="member-search-btn">Search</button>
+      </div>
+      <ul id="member-results" class="member-results" hidden></ul>
+      <div id="member-profile" class="member-profile" hidden>
+        <h2 id="member-name" class="member-name"></h2>
+        <div id="member-facts" class="member-facts"></div>
+      </div>
       <div class="timeline">
         <div class="timeline-inner">
-          <div id="ticks" class="ticks"></div>
           <div id="sessions" class="sessions"></div>
         </div>
       </div>
-      <div class="controls">
-        <input id="bioguide" value="B001292" aria-label="Bioguide ID" />
-        <button id="load">Load Bills</button>
-      </div>
       <div id="status" class="summary">Ready.</div>
+      <div id="focus-areas-section" class="focus-areas-section" hidden>
+        <div class="focus-areas-head">
+          <h2 class="focus-areas-label">Sponsored Bills by Policy Area</h2>
+          <span id="focus-areas-meta" class="focus-areas-meta"></span>
+        </div>
+        <div id="focus-areas-bar" class="focus-areas-bar" role="img"></div>
+        <ul id="focus-areas" class="focus-areas"></ul>
+      </div>
     </header>
 
     <main>

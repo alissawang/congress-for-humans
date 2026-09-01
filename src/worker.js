@@ -109,6 +109,128 @@ function isCurrentCongressSession(startYear, endYear) {
   return startYear <= nowYear && (endYear == null || endYear >= nowYear);
 }
 
+function normalizeMember(m) {
+  const lastTerm = m.terms?.item?.[m.terms.item.length - 1];
+  return {
+    bioguideId: m.bioguideId,
+    name: m.name,
+    state: m.state,
+    district: m.district ?? null,
+    partyName: m.partyName,
+    chamber: lastTerm?.chamber ?? null,
+    imageUrl: m.depiction?.imageUrl ?? null,
+  };
+}
+
+async function computeMemberRoster(congressNum, env) {
+  // Session start/end years are immutable, so this lookup is always cached forever.
+  const session = await fetchCongressJson(`congress/${congressNum}`, {}, env);
+  const isCurrent = isCurrentCongressSession(session.congress.startYear, session.congress.endYear);
+  const rawTtl = isCurrent ? CURRENT_CONGRESS_REFRESH_SECONDS : undefined;
+
+  // currentMember=false per the API docs' guidance for getting the complete
+  // roster of everyone who served in this Congress, not just those still serving.
+  const members = await paginateCongress(
+    `member/congress/${congressNum}`,
+    { currentMember: false },
+    env,
+    (page) => page.members ?? [],
+    { ttlSeconds: rawTtl }
+  );
+  return members.map(normalizeMember);
+}
+
+async function persistMemberRoster(env, cacheKey, roster) {
+  const entry = JSON.stringify({ members: roster, computedAt: Date.now() });
+  await env.CACHE.put(cacheKey, entry);
+}
+
+async function revalidateMemberRoster(congressNum, env, cacheKey, lockKey) {
+  const lockHeld = await env.CACHE.get(lockKey);
+  if (lockHeld) return;
+  await env.CACHE.put(lockKey, "1", { expirationTtl: REVALIDATE_LOCK_TTL_SECONDS });
+
+  try {
+    const roster = await computeMemberRoster(congressNum, env);
+    await persistMemberRoster(env, cacheKey, roster);
+  } catch (err) {
+    console.error(`background member-roster revalidation failed for congress ${congressNum}: ${err.message}`);
+  }
+}
+
+async function getMemberRoster(congressNum, env, ctx) {
+  const cacheKey = `member-roster:${congressNum}`;
+  const lockKey = `member-roster-lock:${congressNum}`;
+  const cachedRaw = await env.CACHE.get(cacheKey);
+
+  if (cachedRaw) {
+    const parsed = JSON.parse(cachedRaw);
+    let stale = false;
+    try {
+      const session = await fetchCongressJson(`congress/${congressNum}`, {}, env);
+      const isCurrent = isCurrentCongressSession(session.congress.startYear, session.congress.endYear);
+      stale = isCurrent && (Date.now() - parsed.computedAt) / 1000 > CURRENT_CONGRESS_REFRESH_SECONDS;
+    } catch (err) {
+      console.error(`current-congress check failed for congress ${congressNum}: ${err.message}`);
+    }
+
+    if (stale) ctx.waitUntil(revalidateMemberRoster(congressNum, env, cacheKey, lockKey));
+    return parsed.members;
+  }
+
+  const roster = await computeMemberRoster(congressNum, env);
+  await persistMemberRoster(env, cacheKey, roster);
+  return roster;
+}
+
+async function resolveCurrentCongressNumber(env) {
+  const page = await fetchCongressJson("congress", { limit: 1 }, env, { ttlSeconds: DEFAULT_TTL_SECONDS });
+  const match = page?.congresses?.[0]?.url?.match(/\/congress\/(\d+)/);
+  if (!match) throw new Error("Could not determine current Congress number");
+  return Number(match[1]);
+}
+
+function filterMembers(members, { q, state, district }) {
+  const query = q?.trim().toLowerCase();
+  const stateQuery = state?.trim().toLowerCase();
+  const districtQuery = district?.trim();
+
+  return members.filter((m) => {
+    if (query && !m.name.toLowerCase().includes(query)) return false;
+    if (stateQuery && m.state?.toLowerCase() !== stateQuery) return false;
+    if (districtQuery && String(m.district ?? "") !== districtQuery) return false;
+    return true;
+  });
+}
+
+async function handleMemberSearch(url, env, ctx) {
+  const congressParam = url.searchParams.get("congress");
+  let congressNum;
+  try {
+    congressNum = congressParam ? Number(congressParam) : await resolveCurrentCongressNumber(env);
+  } catch (err) {
+    return new Response(`Failed to resolve Congress number: ${err.message}`, { status: 502, headers: CORS_HEADERS });
+  }
+  if (!Number.isInteger(congressNum) || congressNum <= 0) {
+    return new Response("Invalid congress query parameter", { status: 400, headers: CORS_HEADERS });
+  }
+
+  try {
+    const roster = await getMemberRoster(congressNum, env, ctx);
+    const results = filterMembers(roster, {
+      q: url.searchParams.get("q"),
+      state: url.searchParams.get("state"),
+      district: url.searchParams.get("district"),
+    });
+    return new Response(JSON.stringify({ congress: congressNum, count: results.length, members: results }), {
+      status: 200,
+      headers: { "content-type": "application/json", ...CORS_HEADERS },
+    });
+  } catch (err) {
+    return new Response(`Failed to search members: ${err.message}`, { status: 502, headers: CORS_HEADERS });
+  }
+}
+
 async function computeBillCounts(congressNum, env) {
   // Session start/end years are immutable regardless of whether the congress is
   // still active, so this lookup is always cached forever (no ttlSeconds).
@@ -328,6 +450,123 @@ function tryParseJson(text) {
   }
 }
 
+async function generateFocusAreas(year, areas, apiKey) {
+  const sections = areas
+    .map((a) => `[${a.category}]\n` + a.bills.map((t, i) => `${i + 1}. ${t}`).join("\n"))
+    .join("\n\n");
+
+  const body = JSON.stringify({
+    model: "claude-sonnet-4-6",
+    max_tokens: 500,
+    messages: [
+      {
+        role: "user",
+        content:
+          `Here are bills a member of Congress sponsored in ${year}, grouped by policy area:\n\n${sections}\n\n` +
+          "For each policy area listed above, write a short label (a few words, not a full sentence) for " +
+          "EVERY bill listed in that area — not a generic restatement of the policy area's name. Every bill " +
+          "number must get exactly one label; do not skip any or combine multiple bills into one label. " +
+          "Each label will be displayed lowercase mid-sentence, so do NOT capitalize the first word unless " +
+          'it is a proper noun or acronym (e.g. "wildlife corridors", "AI guardrails", "Medicare cuts", ' +
+          '"ESA override"). Return a JSON object where each key is the policy area name exactly as given in ' +
+          'brackets above, and each value is an array of objects like {"bill": <the bill\'s number from the ' +
+          'list above>, "label": <short label string>}, one per bill. The shorter the better: keep each ' +
+          "label to just a few words, since all the labels for a policy area, joined with \", \", must fit " +
+          "on a single line in the UI.",
+      },
+    ],
+  });
+
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body,
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const text = data.content?.[0]?.text || "";
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      const parsed = jsonMatch ? tryParseJson(jsonMatch[0]) : null;
+      if (parsed) return parsed;
+
+      if (attempt >= MAX_SUMMARY_RETRIES) {
+        console.error(`generateFocusAreas: unparseable completion after ${attempt + 1} attempt(s), giving up. Raw text: ${text.slice(0, 200)}`);
+        return {};
+      }
+      const backoffMs = SUMMARY_RETRY_BASE_DELAY_MS * 2 ** attempt;
+      console.error(`generateFocusAreas: unparseable completion (attempt ${attempt + 1}); retrying in ${backoffMs}ms`);
+      await sleep(backoffMs + Math.random() * backoffMs * 0.25);
+      continue;
+    }
+
+    const text = await res.text();
+    const retryable = (res.status === 429 || res.status >= 500) && attempt < MAX_SUMMARY_RETRIES;
+    if (!retryable) {
+      console.error(`generateFocusAreas: Anthropic API ${res.status} after ${attempt + 1} attempt(s), giving up: ${text.slice(0, 200)}`);
+      return {};
+    }
+
+    const retryAfterSecs = Number(res.headers.get("retry-after"));
+    const backoffMs = Number.isFinite(retryAfterSecs) && retryAfterSecs > 0
+      ? retryAfterSecs * 1000
+      : SUMMARY_RETRY_BASE_DELAY_MS * 2 ** attempt;
+    console.error(`generateFocusAreas: Anthropic API ${res.status} (attempt ${attempt + 1}); retrying in ${backoffMs}ms`);
+    await sleep(backoffMs + Math.random() * backoffMs * 0.25);
+  }
+}
+
+async function handleFocusAreas(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return new Response("Invalid JSON body", { status: 400, headers: CORS_HEADERS });
+  }
+
+  const bioguideId = typeof body?.bioguideId === "string" ? body.bioguideId : "";
+  const year = Number(body?.year);
+  const areas = Array.isArray(body?.areas)
+    ? body.areas
+        .filter((a) => a && typeof a.category === "string" && Array.isArray(a.bills))
+        .map((a) => ({ category: a.category, bills: a.bills.filter((t) => typeof t === "string" && t) }))
+        .filter((a) => a.bills.length > 0)
+    : [];
+
+  if (!bioguideId || !Number.isInteger(year) || areas.length === 0) {
+    return new Response("Missing bioguideId, year, or areas", { status: 400, headers: CORS_HEADERS });
+  }
+
+  const cacheKey = `focus-areas:${bioguideId}:${year}`;
+  const cached = await env.SUMMARY_CACHE.get(cacheKey);
+  if (cached) {
+    return new Response(JSON.stringify({ areas: JSON.parse(cached) }), {
+      status: 200,
+      headers: { "content-type": "application/json", ...CORS_HEADERS },
+    });
+  }
+
+  const apiKey = env.CLAUDE_API_KEY;
+  if (!apiKey) {
+    return new Response("Missing CLAUDE_API_KEY secret", { status: 500, headers: CORS_HEADERS });
+  }
+
+  const areaTexts = await generateFocusAreas(year, areas, apiKey);
+  if (Object.keys(areaTexts).length > 0) {
+    await env.SUMMARY_CACHE.put(cacheKey, JSON.stringify(areaTexts));
+  }
+
+  return new Response(JSON.stringify({ areas: areaTexts }), {
+    status: 200,
+    headers: { "content-type": "application/json", ...CORS_HEADERS },
+  });
+}
+
 async function handleSummarize(request, env) {
   let body;
   try {
@@ -410,11 +649,25 @@ export default {
       return handleSummarize(request, env);
     }
 
+    if (url.pathname === "/focus-areas") {
+      if (request.method !== "POST") {
+        return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
+      }
+      return handleFocusAreas(request, env);
+    }
+
     if (url.pathname === "/bill-counts") {
       if (request.method !== "GET") {
         return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
       }
       return handleBillCounts(url, env, ctx);
+    }
+
+    if (url.pathname === "/member-search") {
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
+      }
+      return handleMemberSearch(url, env, ctx);
     }
 
     if (request.method !== "GET") {

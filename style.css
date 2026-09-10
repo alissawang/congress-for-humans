@@ -1,9 +1,9 @@
 @import url("https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;600;700&display=swap");
 
 :root {
-  --ink: #1b1b1b;
-  --accent: #032982;
-  --accent-2: #c8a86b;
+  --ink: #535353;
+  --accent: #02419f;
+  --accent-2: #e1e1e1;
   --border: #e3d7c7;
 }
 
@@ -40,7 +40,7 @@ h1 {
 
 .controls {
   display: grid;
-  grid-template-columns: 1.6fr 1.4fr 100px auto;
+  grid-template-columns: 1.6fr 1.4fr 120px auto;
   gap: 12px;
   max-width: 720px;
 }
@@ -61,6 +61,14 @@ select {
   min-width: 0;
 }
 
+/* The district picker is dead until a state scopes it. */
+select:disabled {
+  color: #a9a9a9;
+  background: #f4f4f4;
+  cursor: not-allowed;
+  opacity: 1;                 /* Safari dims disabled controls on top of this */
+}
+
 .member-results {
   list-style: none;
   margin: 0;
@@ -78,9 +86,81 @@ select {
   display: block;
 }
 
+/* Map card on the left, name / facts / timeline stacked beside it. */
 .member-profile {
-  max-width: 720px;
-  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  margin-top: 8px;
+}
+
+.member-profile-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Author `display` beats the UA [hidden] rule, so state it explicitly — same trap
+   that bit the SVG, and the reason an empty card lingered for shapeless states. */
+.member-map-panel[hidden] {
+  display: none;
+}
+
+.member-map-panel {
+  flex: none;
+  width: 400px;
+  height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: #f3f2ee;
+  border-radius: 18px;
+}
+
+/* `hidden` does nothing on an SVG element: the UA stylesheet's [hidden] rule is
+   namespaced to HTML and SVGElement doesn't reflect the property, so the panel
+   above (a real HTML element) is what gets toggled. Kept as a safety net. */
+.member-map[hidden] {
+  display: none;
+}
+
+.member-map {
+  width: 100%;
+  height: 100%;
+  /* A viewBox gives the SVG an intrinsic aspect ratio; without this its automatic
+     minimum size can leak out and stretch the card. */
+  min-width: 0;
+  min-height: 0;
+  overflow: visible;
+}
+
+.member-map path {
+  fill: #d9d7d0;
+  stroke: #f3f2ee;
+  stroke-width: 0.7;
+  stroke-linejoin: round;
+}
+
+/* Just enough stroke to keep a tiny urban district from disappearing. Keep this
+   low — the stroke dilates the shape, so a heavy one reads as a blob rather than
+   the district's actual outline. */
+.member-map path.is-active {
+  fill: var(--ink);
+  stroke: var(--ink);
+  stroke-width: 1;
+  stroke-linejoin: miter;
+}
+
+/* Chamber kicker above the name. No `display` declaration here on purpose — an
+   author one would beat the UA [hidden] rule and the empty label would still
+   take up a row. */
+.member-title {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--ink);
 }
 
 .member-name {
@@ -152,7 +232,6 @@ main {
 
 .focus-areas-section {
   --fa-rule: #e7e2d7;
-  max-width: 980px;
   margin-top: 14px;
   padding: 20px 24px 0;
   background: #f8f6f1;
@@ -270,16 +349,16 @@ main {
 }
 
 .timeline {
-  max-width: 980px;
   width: 100%;
-  padding: 6px 0 2px;
+  padding: 10px 0 2px;
 }
 
 .timeline-inner {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  min-width: 900px;
+  /* No min-width: the timeline shares a row with the map card, so a floor here
+     pushes it past the right edge of the policy-area box below. */
 }
 
 .sessions {

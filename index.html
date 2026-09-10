@@ -70,17 +70,25 @@
           <option value="Wisconsin">Wisconsin</option>
           <option value="Wyoming">Wyoming</option>
         </select>
-        <input id="member-district" placeholder="District (optional)" aria-label="District" autocomplete="off" inputmode="numeric" />
+        <select id="member-district" aria-label="District" disabled>
+          <option value="">District</option>
+        </select>
         <button id="member-search-btn">Search</button>
       </div>
       <ul id="member-results" class="member-results" hidden></ul>
       <div id="member-profile" class="member-profile" hidden>
-        <h2 id="member-name" class="member-name"></h2>
-        <div id="member-facts" class="member-facts"></div>
-      </div>
-      <div class="timeline">
-        <div class="timeline-inner">
-          <div id="sessions" class="sessions"></div>
+        <div id="member-map-panel" class="member-map-panel" hidden>
+          <svg id="member-map" class="member-map" role="img"></svg>
+        </div>
+        <div class="member-profile-main">
+          <div id="member-title" class="member-title" hidden></div>
+          <h2 id="member-name" class="member-name"></h2>
+          <div id="member-facts" class="member-facts"></div>
+          <div class="timeline">
+            <div class="timeline-inner">
+              <div id="sessions" class="sessions"></div>
+            </div>
+          </div>
         </div>
       </div>
       <div id="status" class="summary">Ready.</div>

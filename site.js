@@ -158,11 +158,14 @@ const ui = {
   sessions: document.getElementById("sessions"),
   memberProfile: document.getElementById("member-profile"),
   memberName: document.getElementById("member-name"),
+  memberTitle: document.getElementById("member-title"),
   memberFacts: document.getElementById("member-facts"),
   focusAreasSection: document.getElementById("focus-areas-section"),
   focusAreas: document.getElementById("focus-areas"),
   focusAreasBar: document.getElementById("focus-areas-bar"),
   focusAreasMeta: document.getElementById("focus-areas-meta"),
+  memberMap: document.getElementById("member-map"),
+  memberMapPanel: document.getElementById("member-map-panel"),
 };
 
 // Keeps the status line out of the layout entirely when it has nothing to say,
@@ -454,18 +457,182 @@ function renderYearTimeline(yearGroups, activeKey, bioguideId, member) {
   }
 }
 
-function districtForYear(member, year) {
+// The term covering a given year. Carries chamber, stateCode and district, so the
+// label and the map both come from one lookup and stay consistent across redistricting.
+function termForYear(member, year) {
   const terms = Array.isArray(member.terms) ? member.terms : [];
-  const term = terms.find((t) => t.startYear <= year && (t.endYear == null || year <= t.endYear));
-  return term ? term.district ?? null : member.district;
+  if (year == null) return terms[terms.length - 1] ?? null;
+  return terms.find((t) => t.startYear <= year && (t.endYear == null || year <= t.endYear)) ?? null;
+}
+
+// Party can change mid-career (Sinema, Manchin), so pick the entry covering the
+// selected year rather than whatever is current.
+function partyForYear(member, year) {
+  const history = Array.isArray(member.partyHistory) ? [...member.partyHistory] : [];
+  if (!history.length) return null;
+  history.sort((a, b) => (a.startYear ?? 0) - (b.startYear ?? 0));
+  const target = year ?? new Date().getFullYear();
+  const covering = history.filter((p) => (p.startYear ?? 0) <= target);
+  const party = covering.length ? covering[covering.length - 1] : history[0];
+  return party.partyAbbreviation || (party.partyName ? party.partyName[0] : null);
+}
+
+// Every seat has a shape at 1:5,000,000 — including the island delegations the
+// coarser 1:20,000,000 file left out. Kept as a guard so an unexpected state code
+// skips the fetch rather than 404ing.
+const STATES_WITH_SHAPES = new Set(["AK","AL","AR","AS","AZ","CA","CO","CT","DC","DE","FL","GA","GU","HI","IA","ID","IL","IN","KS","KY","LA","MA","MD","ME","MI","MN","MO","MP","MS","MT","NC","ND","NE","NH","NJ","NM","NV","NY","OH","OK","OR","PA","PR","RI","SC","SD","TN","TX","UT","VA","VI","VT","WA","WI","WV","WY"]);
+
+const districtShapeCache = new Map();
+let latestMapToken = 0;
+let renderedMapState = null;
+
+// Setting .hidden on an SVG element is a no-op (HTML-only property), so toggle the
+// attribute and clear the geometry — otherwise the previous state stays on screen.
+function hideDistrictMap() {
+  ui.memberMapPanel.hidden = true;
+  ui.memberMap.innerHTML = "";
+  ui.memberMap.removeAttribute("aria-label");
+  renderedMapState = null;
+}
+
+function loadDistrictShapes(stateCode) {
+  if (!STATES_WITH_SHAPES.has(stateCode)) return Promise.resolve(null);
+  if (!districtShapeCache.has(stateCode)) {
+    districtShapeCache.set(
+      stateCode,
+      fetch(`./geo-boundaries/${stateCode}.json`)
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null)
+    );
+  }
+  return districtShapeCache.get(stateCode);
+}
+
+// Equirectangular projection into a unit-height box. One state spans a small
+// enough extent that a real projection is overkill, but longitude still has to be
+// scaled by cos(latitude) or the state comes out stretched sideways.
+function projectFeatures(features) {
+  let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+  const eachRing = (geom, fn) => {
+    const polys = geom.type === "Polygon" ? [geom.coordinates] : geom.coordinates;
+    for (const poly of polys) for (const ring of poly) fn(ring);
+  };
+  for (const f of features) {
+    eachRing(f.geometry, (ring) => {
+      for (const [lon, lat] of ring) {
+        if (lon < minLon) minLon = lon;
+        if (lon > maxLon) maxLon = lon;
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+      }
+    });
+  }
+  if (!Number.isFinite(minLon)) return null;
+
+  // Alaska's Aleutians cross the antimeridian, so its raw bounding box spans ~359°
+  // and would squash the state into a sliver. Shift the western islands past 180°
+  // to keep the state contiguous.
+  const wraps = maxLon - minLon > 180;
+  const lonOf = (lon) => (wraps && lon < 0 ? lon + 360 : lon);
+  if (wraps) {
+    minLon = Infinity;
+    maxLon = -Infinity;
+    for (const f of features) {
+      eachRing(f.geometry, (ring) => {
+        for (const [lon] of ring) {
+          const L = lonOf(lon);
+          if (L < minLon) minLon = L;
+          if (L > maxLon) maxLon = L;
+        }
+      });
+    }
+  }
+
+  const k = Math.cos((((minLat + maxLat) / 2) * Math.PI) / 180) || 1;
+  const spanX = Math.max((maxLon - minLon) * k, 1e-9);
+  const spanY = Math.max(maxLat - minLat, 1e-9);
+  const height = 100;
+  const scale = height / spanY;
+  const width = spanX * scale;
+
+  const paths = features.map((f) => {
+    let d = "";
+    eachRing(f.geometry, (ring) => {
+      ring.forEach(([lon, lat], i) => {
+        const x = ((lonOf(lon) - minLon) * k * scale).toFixed(2);
+        const y = ((maxLat - lat) * scale).toFixed(2);
+        d += (i ? "L" : "M") + x + "," + y;
+      });
+      d += "Z";
+    });
+    return { d, district: f.properties.d };
+  });
+  return { paths, width, height };
+}
+
+function renderDistrictMap(term) {
+  const token = ++latestMapToken;
+  const stateCode = (term && term.stateCode) || null;
+
+  // Drop the old map up front when the state changes, so another state's outline is
+  // never left showing while this one loads (or fails to).
+  if (stateCode !== renderedMapState) hideDistrictMap();
+  if (!stateCode) return;
+
+  loadDistrictShapes(stateCode).then((geo) => {
+    if (token !== latestMapToken) return;                  // a newer year won the race
+    if (!geo || !geo.features || !geo.features.length) {
+      hideDistrictMap();                                   // e.g. GU/AS/MP/VI have no shapes
+      return;
+    }
+    const projected = projectFeatures(geo.features);
+    if (!projected) {
+      hideDistrictMap();
+      return;
+    }
+
+    // Senators represent the whole state, so nothing is singled out. At-large
+    // reps have no district in the member-detail payload, so chamber is the
+    // reliable signal — their state has a single district either way.
+    const isHouse = /house/i.test(term.chamber || "");
+    const target = term.district ?? null;
+    ui.memberMap.setAttribute("viewBox", `0 0 ${projected.width.toFixed(2)} ${projected.height}`);
+    ui.memberMap.innerHTML = projected.paths
+      .map((p) => {
+        const active = !isHouse || target == null || p.district === target;
+        return `<path d="${p.d}" class="${active ? "is-active" : ""}"></path>`;
+      })
+      .join("");
+    ui.memberMap.setAttribute(
+      "aria-label",
+      isHouse && target != null
+        ? `${term.stateName || stateCode}, district ${target} highlighted`
+        : `${term.stateName || stateCode}`
+    );
+    ui.memberMapPanel.hidden = false;
+    renderedMapState = stateCode;
+  });
 }
 
 function renderMemberProfile(member, year) {
-  ui.memberName.textContent = member.directOrderName || member.invertedOrderName || member.name || "";
+  const name = member.directOrderName || member.invertedOrderName || member.name || "";
+  const party = partyForYear(member, year);
+  ui.memberName.textContent = party ? `${name} (${party})` : name;
 
-  const termCount = Array.isArray(member.terms) ? member.terms.length : 0;
-  const district = year != null ? districtForYear(member, year) : member.district;
+  const term = termForYear(member, year);
+  const district = term ? term.district ?? null : member.district;
   const districtLabel = district != null ? `District ${district}` : null;
+  renderDistrictMap(term);
+  // Chamber comes from the term, not the member, so someone who moved from the
+  // House to the Senate reads correctly for whichever year is selected.
+  const chamber = term ? term.chamber || "" : "";
+  const title = /senate/i.test(chamber)
+    ? "Senator"
+    : /house/i.test(chamber)
+      ? "Representative"
+      : "";
+  ui.memberTitle.textContent = title;
+  ui.memberTitle.hidden = !title;
   const facts = [
     member.state,
     districtLabel,
@@ -516,6 +683,99 @@ async function loadBills(bioguideId) {
   }
 }
 
+// Seats per state in the 119th Congress, counted off the shapes in geo-boundaries/.
+// 0 means a single at-large seat (the API reports its district as 0), so there is
+// nothing to choose between.
+const STATE_DISTRICT_COUNTS = {
+  "Alabama": 7,
+  "Alaska": 0,
+  "American Samoa": 0,
+  "Arizona": 9,
+  "Arkansas": 4,
+  "California": 52,
+  "Colorado": 8,
+  "Connecticut": 5,
+  "Delaware": 0,
+  "District of Columbia": 0,
+  "Florida": 28,
+  "Georgia": 14,
+  "Guam": 0,
+  "Hawaii": 2,
+  "Idaho": 2,
+  "Illinois": 17,
+  "Indiana": 9,
+  "Iowa": 4,
+  "Kansas": 4,
+  "Kentucky": 6,
+  "Louisiana": 6,
+  "Maine": 2,
+  "Maryland": 8,
+  "Massachusetts": 9,
+  "Michigan": 13,
+  "Minnesota": 8,
+  "Mississippi": 4,
+  "Missouri": 8,
+  "Montana": 2,
+  "Nebraska": 3,
+  "Nevada": 4,
+  "New Hampshire": 2,
+  "New Jersey": 12,
+  "New Mexico": 3,
+  "New York": 26,
+  "North Carolina": 14,
+  "North Dakota": 0,
+  "Northern Mariana Islands": 0,
+  "Ohio": 15,
+  "Oklahoma": 5,
+  "Oregon": 6,
+  "Pennsylvania": 17,
+  "Puerto Rico": 0,
+  "Rhode Island": 2,
+  "South Carolina": 7,
+  "South Dakota": 0,
+  "Tennessee": 9,
+  "Texas": 38,
+  "Utah": 4,
+  "Vermont": 0,
+  "Virgin Islands": 0,
+  "Virginia": 11,
+  "Washington": 10,
+  "West Virginia": 2,
+  "Wisconsin": 8,
+  "Wyoming": 0,
+};
+
+// The district picker only makes sense once a state narrows it down, so it stays
+// disabled until then and lists exactly the districts that state has.
+function populateDistricts() {
+  const state = ui.memberState.value;
+  const count = STATE_DISTRICT_COUNTS[state];
+  ui.memberDistrict.innerHTML = "";
+  const any = document.createElement("option");
+  any.value = "";
+  any.textContent = "District";
+  ui.memberDistrict.appendChild(any);
+
+  if (!state) {
+    ui.memberDistrict.disabled = true;
+    return;
+  }
+  if (count === 0) {
+    const atLarge = document.createElement("option");
+    atLarge.value = "0";
+    atLarge.textContent = "At-large";
+    ui.memberDistrict.appendChild(atLarge);
+  } else {
+    for (let d = 1; d <= count; d++) {
+      const opt = document.createElement("option");
+      opt.value = String(d);
+      opt.textContent = String(d);
+      ui.memberDistrict.appendChild(opt);
+    }
+  }
+  ui.memberDistrict.disabled = false;
+}
+
 let searchDebounceTimer = null;
 let latestSearchToken = 0;
 
@@ -557,6 +817,7 @@ function selectMember(member) {
   clearResults();
   ui.memberQuery.value = member.name;
   ui.memberState.value = member.state || "";
+  populateDistricts();                                   // options first, then the value
   ui.memberDistrict.value = member.district != null ? String(member.district) : "";
   loadBills(member.bioguideId);
 }
@@ -588,14 +849,19 @@ function scheduleSearch() {
 }
 
 ui.memberQuery.addEventListener("input", scheduleSearch);
-ui.memberDistrict.addEventListener("input", scheduleSearch);
+
+// A pick is discrete — no keystrokes to wait out.
+ui.memberDistrict.addEventListener("change", () => {
+  clearTimeout(searchDebounceTimer);
+  runSearch();
+});
 
 // Picking a state means "show me this state's members", so drop the name and
 // district left over from the last selection — they AND with the state and would
 // otherwise match nothing.
 ui.memberState.addEventListener("change", () => {
   ui.memberQuery.value = "";
-  ui.memberDistrict.value = "";
+  populateDistricts();
   clearTimeout(searchDebounceTimer);
   runSearch();
 });
@@ -604,6 +870,9 @@ ui.searchBtn.addEventListener("click", () => {
   runSearch();
 });
 document.addEventListener("click", (e) => {
+  // Browsing a state is a persistent roster, not a typeahead dropdown — leave it
+  // up until the state is cleared or another search replaces it.
+  if (ui.memberState.value) return;
   if (
     !ui.results.contains(e.target) &&
     e.target !== ui.memberQuery &&

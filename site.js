@@ -330,12 +330,15 @@ function fillPixelArtSquares(squares, base, gap, bills, fillerCount, color, fill
   }
 }
 
-function renderGroups(groups, totalCounts = {}) {
+// `totalCounts` is null until the chamber-wide counts arrive, which lets the grid
+// paint from the member's own bills alone: no filler squares, no "/ total", and
+// ordered by the member's own count until the real totals can reorder it.
+function renderGroups(groups, totalCounts = null) {
   ui.grid.innerHTML = "";
 
   const sponsoredMap = new Map(groups.map((g) => [g.category, g]));
   const allCategoryNames = new Set([
-    ...Object.keys(totalCounts),
+    ...Object.keys(totalCounts ?? {}),
     ...groups.map((g) => g.category),
   ]);
 
@@ -351,10 +354,10 @@ function renderGroups(groups, totalCounts = {}) {
         category,
         bills: g?.bills ?? [],
         count: g?.count ?? 0,
-        total: totalCounts[category] ?? 0,
+        total: totalCounts?.[category] ?? 0,
       };
     })
-    .sort((a, b) => b.total - a.total);
+    .sort((a, b) => (totalCounts ? b.total - a.total : b.count - a.count));
 
   const tooltip = getTooltipElement();
 
@@ -375,7 +378,7 @@ function renderGroups(groups, totalCounts = {}) {
 
     const counts = document.createElement("div");
     counts.className = "policy-cell-counts";
-    counts.textContent = `${g.count} / ${g.total}`;
+    counts.textContent = totalCounts ? `${g.count} / ${g.total}` : String(g.count);
 
     const squares = document.createElement("div");
     squares.className = "policy-squares";
@@ -405,6 +408,57 @@ function renderGroups(groups, totalCounts = {}) {
   ui.grid.appendChild(grid);
 }
 
+// Bumped on every year/member selection, so a slow response belonging to a view
+// the user has already navigated away from can't paint over the current one.
+let billViewToken = 0;
+
+// Paints everything derivable from the bills already in hand, then lets each
+// remote piece upgrade the view as it lands — so the grid and focus areas are on
+// screen while Claude is still summarizing, rather than only afterwards.
+async function renderYearView(bioguideId, group) {
+  const token = ++billViewToken;
+  const grouped = groupBillsByPolicyArea(group.bills);
+  const topGroups = grouped.slice(0, TOP_FOCUS_AREA_COUNT);
+
+  // The focus-area list and its bar come straight off the bills already in hand.
+  renderFocusAreas(topGroups, null, group.bills);
+  setStatus(`Summarizing ${group.bills.length} sponsored bill${group.bills.length === 1 ? "" : "s"}…`);
+
+  // One piece failing shouldn't blank the pieces that did load, so each is
+  // tracked on its own instead of a single rejection aborting the batch.
+  const failed = [];
+  const track = (label, promise) =>
+    promise.catch((err) => {
+      failed.push(label);
+      console.error(`${label} failed: ${err?.message ?? err}`);
+    });
+
+  // All three start together; only the paints below wait on them.
+  const counts = track("bill counts", countBillsByPolicyArea(group.congress));
+  // Tooltips read bill._summary at hover time, so summaries need no re-render:
+  // they start appearing as soon as they've been written onto the bills.
+  const summaries = track("summaries", summarizeBillsWithClaude(group.bills));
+  const focus = track("focus areas", getFocusAreas(bioguideId, group.year, topGroups)).then(
+    (areaTexts) => {
+      if (token === billViewToken && areaTexts) renderFocusAreas(topGroups, areaTexts, group.bills);
+    }
+  );
+
+  // A category's pixel art is sized to its chamber-wide total, not to this member's
+  // slice of it, so painting the grid before the counts land would draw every icon
+  // at a fraction of its final size and then snap it ~10x larger. Only the session's
+  // first selection in a congress actually waits (~200ms, a KV cache hit) — after
+  // that countBillsByPolicyArea resolves from memory. The seconds-long Claude calls
+  // above hold nothing back, and if the counts fail the grid still draws without them.
+  const totalCounts = await counts;
+  if (token !== billViewToken) return;
+  renderGroups(grouped, totalCounts ?? null);
+
+  await Promise.all([summaries, focus]);
+  if (token !== billViewToken) return;
+  setStatus(failed.length ? `Could not load ${failed.join(", ")}.` : "");
+}
+
 function renderYearTimeline(yearGroups, activeKey, bioguideId, member) {
   ui.sessions.innerHTML = "";
   if (!yearGroups.length) return;
@@ -430,26 +484,10 @@ function renderYearTimeline(yearGroups, activeKey, bioguideId, member) {
     node.appendChild(label);
 
     if (group) {
-      node.addEventListener("click", async () => {
+      node.addEventListener("click", () => {
         renderYearTimeline(yearGroups, group.key, bioguideId, member);
         renderMemberProfile(member, group.year);
-        setStatus(`Summarizing ${group.bills.length} sponsored bills…`);
-        ui.focusAreasSection.hidden = true;
-        ui.grid.innerHTML = "";
-        try {
-          const grouped = groupBillsByPolicyArea(group.bills);
-          const topGroups = grouped.slice(0, TOP_FOCUS_AREA_COUNT);
-          const [, totalCounts, areaTexts] = await Promise.all([
-            summarizeBillsWithClaude(group.bills),
-            countBillsByPolicyArea(group.congress),
-            getFocusAreas(bioguideId, group.year, topGroups),
-          ]);
-          renderGroups(grouped, totalCounts);
-          setStatus("");
-          renderFocusAreas(topGroups, areaTexts, group.bills);
-        } catch (err) {
-          setStatus(`Failed to summarize: ${err.message}`);
-        }
+        renderYearView(bioguideId, group);
       });
     }
 
@@ -662,17 +700,7 @@ async function loadBills(bioguideId) {
     renderYearTimeline(yearGroups, activeYear ? activeYear.key : null, bioguideId, member);
 
     if (activeYear) {
-      setStatus(`Summarizing ${activeYear.bills.length} bills…`);
-      const grouped = groupBillsByPolicyArea(activeYear.bills);
-      const topGroups = grouped.slice(0, TOP_FOCUS_AREA_COUNT);
-      const [, totalCounts, areaTexts] = await Promise.all([
-        summarizeBillsWithClaude(activeYear.bills),
-        countBillsByPolicyArea(activeYear.congress),
-        getFocusAreas(bioguideId, activeYear.year, topGroups),
-      ]);
-      renderGroups(grouped, totalCounts);
-      setStatus("");
-      renderFocusAreas(topGroups, areaTexts, activeYear.bills);
+      await renderYearView(bioguideId, activeYear);
     } else {
       setStatus(`Found ${bills.length} sponsored bills.`);
     }

@@ -99,7 +99,9 @@ select:disabled {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  /* Each row sets its own spacing below: the title sits tight against the name,
+     while the facts keep their distance from it. */
+  gap: 0;
 }
 
 /* Author `display` beats the UA [hidden] rule, so state it explicitly — same trap
@@ -161,6 +163,7 @@ select:disabled {
   font-size: 17px;
   font-weight: 600;
   color: var(--ink);
+  /* margin-bottom: 1px; */
 }
 
 .member-name {
@@ -171,7 +174,7 @@ select:disabled {
 .member-facts {
   font-size: 17px;
   color: #666;
-  margin-top: 4px;
+  margin-top: 10px;
 }
 
 .member-results li {
@@ -328,6 +331,9 @@ main {
 .focus-area-desc {
   font-size: 14px;
   line-height: 1.5;
+  /* Holds one line's height while the labels are still being generated, so the
+     row doesn't jump when they land. */
+  min-height: 1.5em;
   color: #6f6a61;
 }
 

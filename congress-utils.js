@@ -35,6 +35,16 @@ async function getMemberDetails(bioguideId) {
   return member;
 }
 
+// The sponsored-legislation list mixes bills and floor amendments, and amendments
+// arrive in a different shape: `amendmentNumber` in place of `number`, a null
+// `type`, and no title, description or policyArea. Checked three ways because only
+// the number field is reliably present across chambers.
+function isAmendment(item) {
+  if (item?.amendmentNumber !== undefined && item?.amendmentNumber !== null) return true;
+  if (/AMDT$/i.test(item?.type ?? "")) return true;
+  return /\/amendment\//i.test(item?.url ?? "");
+}
+
 async function getSponsoredLegislation(bioguideId) {
   const out = [];
   const listPath = `/member/${bioguideId}/sponsored-legislation`;
@@ -44,12 +54,31 @@ async function getSponsoredLegislation(bioguideId) {
       coerceList(page.sponsoredLegislation) ||
       coerceList(page.results) ||
       coerceList(page.items);
-    out.push(...items);
+    out.push(...items.filter((item) => !isAmendment(item)));
   }
   return out;
 }
 
-async function countBillsByPolicyArea(congress_session_num) {
+// Chamber-wide counts are keyed only by congress, so they're identical for every
+// member and every year within one. Cache the promise rather than the value, so
+// concurrent callers share a single request instead of racing duplicates.
+const billCountsByCongress = new Map();
+
+function countBillsByPolicyArea(congress_session_num) {
+  const key = String(congress_session_num);
+  let pending = billCountsByCongress.get(key);
+  if (!pending) {
+    pending = fetchBillCountsByPolicyArea(congress_session_num).catch((err) => {
+      // Never cache a failure — the next selection should get a fresh attempt.
+      billCountsByCongress.delete(key);
+      throw err;
+    });
+    billCountsByCongress.set(key, pending);
+  }
+  return pending;
+}
+
+async function fetchBillCountsByPolicyArea(congress_session_num) {
   const url = new URL(`${WORKER_URL}/bill-counts`);
   url.searchParams.set("congress", String(congress_session_num));
 

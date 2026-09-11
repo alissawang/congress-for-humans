@@ -521,6 +521,16 @@ async function generateFocusAreas(year, areas, apiKey) {
   }
 }
 
+// The labels are derived from the exact bill list sent, so that list has to be part
+// of the cache key. Keying on member+year alone meant a change in what the client
+// sends — filtering out amendments, say — kept serving labels built from the old
+// list, with no way to tell the entry was stale.
+async function fingerprintAreas(areas) {
+  const canonical = JSON.stringify(areas.map((a) => [a.category, a.bills]));
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+  return Array.from(new Uint8Array(digest).slice(0, 8), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 async function handleFocusAreas(request, env) {
   let body;
   try {
@@ -542,7 +552,7 @@ async function handleFocusAreas(request, env) {
     return new Response("Missing bioguideId, year, or areas", { status: 400, headers: CORS_HEADERS });
   }
 
-  const cacheKey = `focus-areas:${bioguideId}:${year}`;
+  const cacheKey = `focus-areas:${bioguideId}:${year}:${await fingerprintAreas(areas)}`;
   const cached = await env.SUMMARY_CACHE.get(cacheKey);
   if (cached) {
     return new Response(JSON.stringify({ areas: JSON.parse(cached) }), {

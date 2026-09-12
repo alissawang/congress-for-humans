@@ -1,6 +1,6 @@
 const WORKER_URL = "https://congress-api-cache.alissa-wang.workers.dev";
 
-import { coerceList } from "./utils.js";
+import { coerceList, billKey } from "./utils.js";
 
 async function getJson(path, params = {}) {
   const url = new URL(WORKER_URL);
@@ -59,6 +59,34 @@ async function getSponsoredLegislation(bioguideId) {
   return out;
 }
 
+// What each bill actually does, from the worker: a CRS summary where one exists,
+// otherwise every distinct title the bill carries, purpose clause first — or the
+// opening of the bill's own text where those titles say almost nothing. Writes
+// {text, source} onto bill._description and leaves the rest untouched.
+async function getBillDescriptions(bills) {
+  const refs = bills
+    .filter((b) => b?.congress && b?.type && b?.number != null)
+    .map((b) => ({ id: billKey(b), congress: b.congress, type: b.type, number: b.number }));
+  if (!refs.length) return { checked: 0, bySource: {} };
+
+  const res = await fetch(`${WORKER_URL}/bill-descriptions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bills: refs }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} ${res.statusText} | ${body.slice(0, 300)}`);
+  }
+
+  const { descriptions, bySource } = await res.json();
+  for (const bill of bills) {
+    const found = descriptions?.[billKey(bill)];
+    if (found?.text) bill._description = { text: String(found.text), source: found.source };
+  }
+  return { checked: refs.length, bySource: bySource || {} };
+}
+
 // Chamber-wide counts are keyed only by congress, so they're identical for every
 // member and every year within one. Cache the promise rather than the value, so
 // concurrent callers share a single request instead of racing duplicates.
@@ -105,4 +133,4 @@ async function searchMembers({ congress, q, state, district } = {}) {
   return res.json();
 }
 
-export { getMemberDetails, getSponsoredLegislation, countBillsByPolicyArea, searchMembers };
+export { getMemberDetails, getSponsoredLegislation, getBillDescriptions, countBillsByPolicyArea, searchMembers };

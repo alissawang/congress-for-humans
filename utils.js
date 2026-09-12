@@ -35,6 +35,67 @@ function makePrimaryName(bill) {
   return candidate[0].toUpperCase() + candidate.slice(1);
 }
 
+// Congress.gov renders each measure type with its own punctuation ("S.3892",
+// "H.R.1", "S.J.Res.12"), so map the API's bare type codes rather than
+// lowercasing them. Unknown codes fall back to the raw type.
+const BILL_TYPE_LABELS = {
+  HR: "H.R.",
+  S: "S.",
+  HRES: "H.Res.",
+  SRES: "S.Res.",
+  HJRES: "H.J.Res.",
+  SJRES: "S.J.Res.",
+  HCONRES: "H.Con.Res.",
+  SCONRES: "S.Con.Res.",
+};
+
+// The id both summary paths key on: unique per measure, and stable across the
+// list and detail shapes the API returns.
+function billKey(bill) {
+  return `${bill.congress}-${bill.type}-${bill.number}`;
+}
+
+// The sponsored-legislation list gives an api.congress.gov URL, which needs an
+// API key and 403s for anyone who clicks it. It does carry the three parts the
+// public page is addressed by, so the link is rebuilt from those instead.
+const BILL_URL_SLUGS = {
+  HR: "house-bill",
+  S: "senate-bill",
+  HRES: "house-resolution",
+  SRES: "senate-resolution",
+  HJRES: "house-joint-resolution",
+  SJRES: "senate-joint-resolution",
+  HCONRES: "house-concurrent-resolution",
+  SCONRES: "senate-concurrent-resolution",
+};
+
+function ordinal(n) {
+  // 11th, 112th and 113th are the exceptions the last-digit rule gets wrong.
+  const lastTwo = n % 100;
+  if (lastTwo >= 11 && lastTwo <= 13) return `${n}th`;
+  return `${n}${["th", "st", "nd", "rd"][n % 10] ?? "th"}`;
+}
+
+function billPageUrl(bill) {
+  const parsed = /\/bill\/(\d+)\/([a-z]+)\/(\d+)/i.exec(bill?.url ?? "");
+  const congress = Number(parsed ? parsed[1] : bill?.congress);
+  const type = String(parsed ? parsed[2] : bill?.type ?? "").toUpperCase();
+  const number = String(parsed ? parsed[3] : bill?.number ?? "");
+
+  const slug = BILL_URL_SLUGS[type];
+  // Every part is checked rather than interpolated as given: these values reach
+  // an href, and an unknown measure type would build a URL that 404s anyway.
+  if (!Number.isInteger(congress) || congress <= 0 || !slug || !/^\d+$/.test(number)) return "";
+  return `https://www.congress.gov/bill/${ordinal(congress)}-congress/${slug}/${number}`;
+}
+
+function formatBillId(bill) {
+  const type = typeof bill?.type === "string" ? bill.type.trim().toUpperCase() : "";
+  const number = bill?.number ?? "";
+  if (!type || number === "" || number === null) return "";
+  return `${BILL_TYPE_LABELS[type] || `${type}.`}${number}`;
+}
+
 function makeSecondaryName(bill, primary) {
   const description = typeof bill?.description === "string" ? bill.description.trim() : "";
   if (description && description !== primary) return description;
@@ -695,6 +756,9 @@ export {
   groupBillsByYear,
   makePrimaryName,
   makeSecondaryName,
+  formatBillId,
+  billPageUrl,
+  billKey,
   DOLLAR_SIGN_BASE,
   BUILDING_BASE,
   HEALTH_CROSS_BASE,

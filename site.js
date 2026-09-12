@@ -1,42 +1,58 @@
 const CATEGORY_PALETTE = {
-  "Agriculture and Food":                          "#59a14f",
-  "Animals":                                       "#53210b",
-  "Armed Forces and National Security":            "#627e2d",
-  "Arts, Culture, Religion":                       "#d4a6c8",
-  "Civil Rights and Liberties, Minority Issues":   "#b07aa1",
-  "Commerce":                                      "#084481",
+  // Government, law, and civil rights
   "Congress":                                      "#b1927b",
-  "Crime and Law Enforcement":                     "#ff9da7",
-  "Economics and Public Finance":                  "#759842",
-  "Education":                                     "#c74f4f",
-  "Emergency Management":                          "#ca1316",
-  "Energy":                                        "#edc948",
-  "Environmental Protection":                      "#15650c",
-  "Families":                                      "#fabfd2",
-  "Finance and Financial Sector":                  "#e4b200",
-  "Foreign Trade and International Finance":       "#ab58c6",
   "Government Operations and Politics":            "#79706e",
-  "Health":                                        "#e15759",
-  "Housing and Community Development":             "#8a5948",
+  "Law":                                           "#dabe8a",
+  "Crime and Law Enforcement":                     "#ff9da7",
+  "Civil Rights and Liberties, Minority Issues":   "#b07aa1",
+  "Native Americans":                              "#a0522d",
+
+  // Borders, foreign affairs, and defense
   "Immigration":                                   "#9c755f",
   "International Affairs":                         "#3aa6dc",
+  "Armed Forces and National Security":            "#627e2d",
+  "Foreign Trade and International Finance":       "#ab58c6",
+
+  // Economy, money, and work
+  "Commerce":                                      "#ee9b00",
+  "Finance and Financial Sector":                  "#e4b200",
+  "Economics and Public Finance":                  "#759842",
+  "Taxation":                                      "#ffcc00",
   "Labor and Employment":                          "#f28e2b",
-  "Law":                                           "#dabe8a",
-  "Native Americans":                              "#a0522d",
-  "Other":                                         "#cccccc",
-  "Public Lands and Natural Resources":            "#8cd17d",
-  "Science, Technology, Communications":           "#76b7b2",
+
+  // Health, welfare, and household
+  "Health":                                        "#e15759",
+  "Families":                                      "#fabfd2",
   "Social Welfare":                                "#d37295",
-  "Sports and Recreation":                         "#499894",
-  "Taxation":                                      "#ffbf00",
-  "Transportation and Public Works":               "#bab0ac",
+  "Housing and Community Development":             "#8a5948",
+  "Education":                                     "#c74f4f",
+
+  // Land, environment, and resources
+  "Agriculture and Food":                          "#59a14f",
+  "Animals":                                       "#53210b",
+  "Environmental Protection":                      "#15650c",
+  "Public Lands and Natural Resources":            "#8cd17d",
   "Water Resources Development":                   "#85c7d4",
+  "Energy":                                        "#edc948",
+
+  // Infrastructure, science, and response
+  "Transportation and Public Works":               "#bab0ac",
+  "Science, Technology, Communications":           "#76b7b2",
+  "Emergency Management":                          "#ca1316",
+
+  // Culture and recreation
+  "Arts, Culture, Religion":                       "#d4a6c8",
+  "Sports and Recreation":                         "#499894",
+
+  "Other":                                         "#cccccc",
 };
 
 import {
   groupBillsByYear,
   makeSecondaryName,
   makePrimaryName,
+  formatBillId,
+  billPageUrl,
   DOLLAR_SIGN_BASE,
   BUILDING_BASE,
   HEALTH_CROSS_BASE,
@@ -72,7 +88,7 @@ import {
   fitShapeToCount,
 } from "./utils.js";
 import { summarizeBillsWithClaude, getFocusAreas } from "./claude-utils.js";
-import { getMemberDetails, getSponsoredLegislation, countBillsByPolicyArea, searchMembers } from "./congress-utils.js";
+import { getMemberDetails, getSponsoredLegislation, getBillDescriptions, countBillsByPolicyArea, searchMembers } from "./congress-utils.js";
 
 function mutedColor(hex) {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -94,33 +110,154 @@ function getTooltipElement() {
   return tooltip;
 }
 
+// A clicked bill pins its description open so it can be read without holding the
+// cursor still. While something is pinned, hovering other bills leaves it alone —
+// otherwise sliding the mouse off to read would immediately replace the text.
+let pinnedEl = null;
+// Rebuilds the pinned tooltip's markup; kept so a summary landing after the pin
+// can repaint it (see refreshPinnedTooltip).
+let pinnedRender = null;
+// The click that pins also bubbles to the document closer below. Set on the way
+// past so that one click doesn't undo itself; the closer clears it.
+let skipNextDocumentClose = false;
+
+function unpinTooltip() {
+  if (pinnedEl) pinnedEl.classList.remove("bill-pinned");
+  document.getElementById("bill-tooltip")?.classList.remove("is-pinned");
+  pinnedEl = null;
+  pinnedRender = null;
+}
+
+function hideBillTooltip() {
+  unpinTooltip();
+  const tooltip = document.getElementById("bill-tooltip");
+  if (tooltip) tooltip.style.display = "none";
+}
+
+// A re-render can replace the element a pin points at. Only pins whose element
+// actually went away are dropped, so repainting one section doesn't close a
+// description opened from another.
+function dropStalePinnedTooltip() {
+  if (pinnedEl && !pinnedEl.isConnected) hideBillTooltip();
+}
+
+// Summaries are written onto the bills as they arrive, so a tooltip pinned before
+// its summary landed would otherwise sit there missing the one line it's for.
+function refreshPinnedTooltip() {
+  if (pinnedRender) pinnedRender();
+}
+
+// Registered once, in the bubble phase, and deliberately does not stopPropagation
+// anywhere — the search results have their own document-level closer that must
+// keep seeing these clicks.
+document.addEventListener("click", (e) => {
+  if (skipNextDocumentClose) {
+    skipNextDocumentClose = false;
+    return;
+  }
+  // A click on the card itself is aimed at its link, not at dismissing it.
+  const tooltip = document.getElementById("bill-tooltip");
+  if (tooltip?.contains(e.target)) return;
+  hideBillTooltip();
+});
+
+// CRS summaries run to a few hundred words — far more than a hover card can hold.
+// Cut at a word boundary so the visible text never ends mid-word.
+const CRS_TOOLTIP_MAX_CHARS = 320;
+// Referral actions naming several committees run past 300 characters, which is
+// more rows than the rest of the card put together.
+const ACTION_TOOLTIP_MAX_CHARS = 140;
+
+function truncateForTooltip(text, max = CRS_TOOLTIP_MAX_CHARS) {
+  if (text.length <= max) return text;
+  const clipped = text.slice(0, max);
+  const lastSpace = clipped.lastIndexOf(" ");
+  return `${(lastSpace > 0 ? clipped.slice(0, lastSpace) : clipped).replace(/[.,;:]$/, "")}…`;
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
 function attachBillTooltip(el, bill, color, category, tooltip) {
   const primary = makePrimaryName(bill);
   const secondary = makeSecondaryName(bill, primary);
+  const billId = formatBillId(bill);
   const introduced = bill.introducedDate || "";
+  const pageUrl = billPageUrl(bill);
+  const actionText = bill.latestAction?.text || "";
+  const actionDate = bill.latestAction?.actionDate || "";
+  // Seven in ten bills were last acted on the day they were introduced, so the
+  // date is only worth a line when it says something the one above doesn't.
+  const showActionDate = actionDate && actionDate !== introduced;
 
-  el.addEventListener("mouseenter", () => {
-    const summary = bill._summary || "";
+  const render = () => {
+    // The generated line is a condensed version of the description below it, so
+    // it supersedes it. Until it arrives the raw description beats nothing.
+    const summary =
+      bill._summary || (bill._description ? truncateForTooltip(bill._description.text) : "");
     tooltip.innerHTML =
-      `<div class="tt-category" style="color:${color}">${category}</div>` +
-      `<div class="tt-primary">${primary}</div>` +
-      (summary ? `<div class="tt-summary">${summary}</div>` : "") +
-      (secondary ? `<div class="tt-secondary">${secondary}</div>` : "") +
-      (introduced ? `<div class="tt-date">${introduced}</div>` : "");
+      `<div class="tt-category" style="color:${color}">${escapeHtml(category)}</div>` +
+      `<div class="tt-primary">` +
+        (billId ? `<span class="tt-bill-id">${escapeHtml(billId)}</span> ` : "") +
+        `${escapeHtml(primary)}</div>` +
+      (summary ? `<div class="tt-summary">${escapeHtml(summary)}</div>` : "") +
+      (secondary ? `<div class="tt-secondary">${escapeHtml(secondary)}</div>` : "") +
+      (introduced ? `<div class="tt-date">Introduced ${escapeHtml(introduced)}</div>` : "") +
+      (actionText
+        ? `<div class="tt-action"><span class="tt-action-label">Latest action</span> ` +
+          (showActionDate ? `${escapeHtml(actionDate)} · ` : "") +
+          `${escapeHtml(truncateForTooltip(actionText, ACTION_TOOLTIP_MAX_CHARS))}</div>`
+        : "") +
+      // Only reachable once the tooltip is pinned — a hover tooltip tracks the
+      // cursor and ignores pointer events, so the hint says how to get to it.
+      (pageUrl
+        ? `<a class="tt-link" href="${pageUrl}" target="_blank" rel="noopener noreferrer">` +
+          `congress.gov<span class="tt-link-hint"> · click bill to open</span></a>`
+        : "");
     tooltip.style.display = "block";
-  });
-  el.addEventListener("mousemove", (e) => {
+  };
+
+  const positionAt = (clientX, clientY) => {
     const pad = 14;
     const tw = tooltip.offsetWidth;
     const th = tooltip.offsetHeight;
-    let x = e.clientX + pad;
-    let y = e.clientY + pad;
-    if (x + tw > window.innerWidth) x = e.clientX - tw - pad;
-    if (y + th > window.innerHeight) y = e.clientY - th - pad;
+    let x = clientX + pad;
+    let y = clientY + pad;
+    if (x + tw > window.innerWidth) x = clientX - tw - pad;
+    if (y + th > window.innerHeight) y = clientY - th - pad;
     tooltip.style.left = `${x}px`;
     tooltip.style.top = `${y}px`;
+  };
+
+  el.addEventListener("mouseenter", () => {
+    if (pinnedEl) return;
+    render();
   });
-  el.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
+  el.addEventListener("mousemove", (e) => {
+    if (pinnedEl) return;
+    positionAt(e.clientX, e.clientY);
+  });
+  el.addEventListener("mouseleave", () => {
+    if (pinnedEl) return;
+    tooltip.style.display = "none";
+  });
+  el.addEventListener("click", (e) => {
+    // Clicking the pinned bill again closes it, so the square you opened is also
+    // the obvious place to click to dismiss. The document closer below finishes
+    // the job — this just declines to re-pin.
+    if (pinnedEl === el) return;
+    unpinTooltip();
+    render();
+    positionAt(e.clientX, e.clientY);
+    pinnedEl = el;
+    pinnedRender = render;
+    el.classList.add("bill-pinned");
+    tooltip.classList.add("is-pinned");
+    skipNextDocumentClose = true;
+  });
 }
 
 function makeBillSquare(bill, color, category, tooltip) {
@@ -164,6 +301,7 @@ const ui = {
   focusAreas: document.getElementById("focus-areas"),
   focusAreasBar: document.getElementById("focus-areas-bar"),
   focusAreasMeta: document.getElementById("focus-areas-meta"),
+  focusAreasProgress: document.getElementById("focus-areas-progress"),
   memberMap: document.getElementById("member-map"),
   memberMapPanel: document.getElementById("member-map-panel"),
 };
@@ -175,11 +313,38 @@ function setStatus(text) {
   ui.status.hidden = !text;
 }
 
+// The only thing still missing while Claude works is the per-area summary text,
+// so the waiting state lives on the focus-area rows themselves — a note in the
+// section header and placeholder bars in the description column — instead of a
+// loose status line shoving the layout around above it.
+function setFocusAreasPending(pending) {
+  ui.focusAreasSection.classList.toggle("is-generating", pending);
+  ui.focusAreasProgress.hidden = !pending;
+}
+
 const TOP_FOCUS_AREA_COUNT = 4;
 
 function capitalizeFirst(text) {
   const trimmed = text.trim();
   return trimmed ? trimmed[0].toUpperCase() + trimmed.slice(1) : trimmed;
+}
+
+// Uneven widths so the placeholder reads as a line of prose rather than a bar
+// chart. Rotated by row so the rows don't stack into one identical block, and
+// keyed off the row index rather than random so re-renders don't reshuffle it.
+const DESC_SKELETON_WIDTHS = ["34%", "22%", "27%", "19%"];
+
+function buildDescSkeleton(rowIndex) {
+  const skeleton = document.createElement("span");
+  skeleton.className = "focus-area-skeleton";
+  skeleton.setAttribute("aria-hidden", "true");
+  for (let i = 0; i < 3; i++) {
+    const bar = document.createElement("span");
+    bar.className = "focus-area-skeleton-bar";
+    bar.style.width = DESC_SKELETON_WIDTHS[(rowIndex + i) % DESC_SKELETON_WIDTHS.length];
+    skeleton.appendChild(bar);
+  }
+  return skeleton;
 }
 
 function renderFocusAreas(topGroups, areaTexts, yearBills = []) {
@@ -214,7 +379,7 @@ function renderFocusAreas(topGroups, areaTexts, yearBills = []) {
     }
   }
 
-  for (const g of topGroups) {
+  for (const [rowIndex, g] of topGroups.entries()) {
     const li = document.createElement("li");
     li.className = "focus-area-item";
 
@@ -240,6 +405,9 @@ function renderFocusAreas(topGroups, areaTexts, yearBills = []) {
     const desc = document.createElement("div");
     desc.className = "focus-area-desc";
     const items = Array.isArray(areaTexts?.[g.category]) ? areaTexts[g.category] : [];
+    // Shown only while .is-generating is set, so a row whose summaries failed or
+    // came back empty collapses to its reserved height rather than pulsing forever.
+    if (!items.length) desc.appendChild(buildDescSkeleton(rowIndex));
     items.forEach((item, i) => {
       const label = String(item.label || "").trim();
       const span = document.createElement("span");
@@ -263,6 +431,7 @@ function renderFocusAreas(topGroups, areaTexts, yearBills = []) {
   }
 
   ui.focusAreasSection.hidden = false;
+  dropStalePinnedTooltip();
 }
 
 const SHAPED_CATEGORIES = {
@@ -406,6 +575,7 @@ function renderGroups(groups, totalCounts = null) {
   }
 
   ui.grid.appendChild(grid);
+  dropStalePinnedTooltip();
 }
 
 // Bumped on every year/member selection, so a slow response belonging to a view
@@ -422,7 +592,8 @@ async function renderYearView(bioguideId, group) {
 
   // The focus-area list and its bar come straight off the bills already in hand.
   renderFocusAreas(topGroups, null, group.bills);
-  setStatus(`Summarizing ${group.bills.length} sponsored bill${group.bills.length === 1 ? "" : "s"}…`);
+  setFocusAreasPending(true);
+  setStatus("");
 
   // One piece failing shouldn't blank the pieces that did load, so each is
   // tracked on its own instead of a single rejection aborting the batch.
@@ -437,7 +608,26 @@ async function renderYearView(bioguideId, group) {
   const counts = track("bill counts", countBillsByPolicyArea(group.congress));
   // Tooltips read bill._summary at hover time, so summaries need no re-render:
   // they start appearing as soon as they've been written onto the bills.
-  const summaries = track("summaries", summarizeBillsWithClaude(group.bills));
+  // Descriptions first: they are what Claude summarizes, so the two calls are a
+  // chain, not a race. The raw description shows in tooltips as soon as it lands,
+  // and the generated line replaces it a moment later.
+  const described = track("bill descriptions", getBillDescriptions(group.bills)).then((result) => {
+    if (token !== billViewToken || !result) return;
+    refreshPinnedTooltip();
+    const { crs = 0, titles = 0, "bill-text": billText = 0 } = result.bySource || {};
+    console.info(
+      `bill descriptions: ${crs} from CRS, ${titles} from bill titles, ` +
+      `${billText} from bill text, ` +
+      `${result.checked - crs - titles - billText} undescribed (of ${result.checked})`
+    );
+  });
+  // A failed description fetch is not fatal: track() already swallowed it, and
+  // those bills fall back to their short title.
+  const summaries = described.then(() =>
+    track("summaries", summarizeBillsWithClaude(group.bills)).then(() => {
+      if (token === billViewToken) refreshPinnedTooltip();
+    })
+  );
   const focus = track("focus areas", getFocusAreas(bioguideId, group.year, topGroups)).then(
     (areaTexts) => {
       if (token === billViewToken && areaTexts) renderFocusAreas(topGroups, areaTexts, group.bills);
@@ -454,8 +644,9 @@ async function renderYearView(bioguideId, group) {
   if (token !== billViewToken) return;
   renderGroups(grouped, totalCounts ?? null);
 
-  await Promise.all([summaries, focus]);
+  await Promise.all([summaries, focus, described]);
   if (token !== billViewToken) return;
+  setFocusAreasPending(false);
   setStatus(failed.length ? `Could not load ${failed.join(", ")}.` : "");
 }
 
@@ -687,6 +878,8 @@ async function loadBills(bioguideId) {
   ui.grid.innerHTML = "";
   ui.sessions.innerHTML = "";
   ui.focusAreasSection.hidden = true;
+  setFocusAreasPending(false);
+  hideBillTooltip();
   ui.memberProfile.hidden = true;
 
   try {

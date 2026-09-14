@@ -1054,5 +1054,21 @@ async function handleRequest(request, env, ctx) {
       status: 200,
       headers: { "content-type": "application/json", "x-cache": "miss", ...CORS_HEADERS },
     });
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    try {
+      return await handleRequest(request, env, ctx);
+    } catch (err) {
+      // Without this the runtime answers with its own 1101 page, which carries no
+      // CORS headers — so every worker fault reaches the browser disguised as a
+      // CORS failure, hiding what actually went wrong.
+      console.error(`unhandled: ${err?.stack || err?.message || err}`);
+      return new Response(`Worker error: ${err?.message ?? err}`, {
+        status: 500,
+        headers: { "content-type": "text/plain", ...CORS_HEADERS },
+      });
+    }
   },
 };

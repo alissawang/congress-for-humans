@@ -260,10 +260,47 @@ main {
   color: var(--accent);
 }
 
+.focus-areas-head-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
 .focus-areas-meta {
   font-size: 13px;
   color: #8d8579;
   font-variant-numeric: tabular-nums;
+}
+
+/* The class's own display would otherwise outrank the UA's [hidden] rule and
+   keep the note on screen after the summaries land. */
+.focus-areas-progress[hidden] {
+  display: none;
+}
+
+.focus-areas-progress {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 13px;
+  color: #8d8579;
+  font-style: italic;
+}
+
+.focus-areas-progress-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  /* Baseline alignment keeps the dot on the text's line rather than its box top. */
+  align-self: center;
+  animation: focus-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes focus-pulse {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 1; }
 }
 
 .focus-areas-bar {
@@ -337,6 +374,48 @@ main {
   color: #6f6a61;
 }
 
+/* The placeholder occupies the description column only while the section is
+   waiting on Claude; once summaries land (or fail) the row falls back to the
+   min-height above, so nothing jumps either way. */
+.focus-area-skeleton {
+  display: none;
+  gap: 6px;
+  align-items: center;
+  height: 1.5em;
+}
+
+.focus-areas-section.is-generating .focus-area-skeleton {
+  display: flex;
+}
+
+.focus-area-skeleton-bar {
+  height: 9px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #ebe6db 25%, #f6f3ec 50%, #ebe6db 75%);
+  background-size: 240% 100%;
+  animation: focus-shimmer 1.4s ease-in-out infinite;
+}
+
+.focus-area-skeleton-bar:nth-child(2) {
+  animation-delay: 0.12s;
+}
+
+.focus-area-skeleton-bar:nth-child(3) {
+  animation-delay: 0.24s;
+}
+
+@keyframes focus-shimmer {
+  from { background-position: 140% 0; }
+  to { background-position: -40% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .focus-areas-progress-dot,
+  .focus-area-skeleton-bar {
+    animation: none;
+  }
+}
+
 .focus-area-sep {
   color: #bdb5a6;
 }
@@ -347,7 +426,10 @@ main {
   transition: color 0.12s ease, text-decoration-color 0.12s ease;
 }
 
-.focus-area-list-item:hover {
+/* A pinned item holds exactly the hover appearance — same rule, so the two can't
+   drift apart. See .bill-pinned. */
+.focus-area-list-item:hover,
+.focus-area-list-item.bill-pinned {
   color: var(--ink);
   text-decoration: underline dotted;
   text-underline-offset: 3px;
@@ -582,6 +664,22 @@ main {
   z-index: 2;
 }
 
+/* A pinned bill stays underlined once the cursor leaves it, so it's clear which
+   bill the open description belongs to. Drawn as a shadow rather than a border,
+   so it costs no layout on squares sized to the pixel; z-index (and the position
+   it needs) keeps a gapless neighbour from painting over the line. */
+.bill-pinned {
+  box-shadow: 0 2px 0 var(--accent);
+  position: relative;
+  z-index: 3;
+}
+
+/* Text underlines itself instead: the focus-area items already draw one on hover,
+   and the pin simply keeps it (see .focus-area-list-item:hover above). */
+.focus-area-list-item.bill-pinned {
+  box-shadow: none;
+}
+
 .bill-tooltip {
   display: none;
   position: fixed;
@@ -596,6 +694,48 @@ main {
   line-height: 1.5;
 }
 
+/* A hover tooltip chases the cursor, so it must not intercept clicks. A pinned
+   one is parked and holds the only clickable thing in the card. */
+.bill-tooltip.is-pinned {
+  pointer-events: auto;
+}
+
+.tt-action {
+  color: #6f6a61;
+  font-size: 11px;
+  margin-top: 3px;
+}
+
+.tt-action-label {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 9px;
+  color: #8d8579;
+  margin-right: 3px;
+}
+
+.tt-link {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.bill-tooltip.is-pinned .tt-link {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* The hint is only true before pinning; once pinned the link is live. */
+.tt-link-hint {
+  color: #8d8579;
+}
+
+.bill-tooltip.is-pinned .tt-link-hint {
+  display: none;
+}
+
 .tt-category {
   font-size: 10px;
   font-weight: 700;
@@ -607,6 +747,11 @@ main {
 .tt-primary {
   font-weight: 600;
   margin-bottom: 4px;
+}
+
+.tt-bill-id {
+  font-variant-numeric: tabular-nums;
+  color: #666;
 }
 
 .tt-summary {

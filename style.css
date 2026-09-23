@@ -1,10 +1,11 @@
 @import url("https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;600;700&display=swap");
 
 :root {
-  --ink: #535353;
+  --ink: #000000;
   --accent: #02419f;
   --accent-2: #e1e1e1;
-  --border: #e3d7c7;
+  --border: #d5d5d5;
+  --district-highlight: #9acb8e;
 }
 
 * {
@@ -61,6 +62,38 @@ select {
   min-width: 0;
 }
 
+.member-query-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.member-query-wrap input {
+  width: 100%;
+  padding-right: 32px;
+}
+
+.member-query-toggle {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: #777;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.member-query-toggle:hover {
+  background: var(--accent-2);
+}
+
 /* The district picker is dead until a state scopes it. */
 select:disabled {
   color: #a9a9a9;
@@ -75,7 +108,6 @@ select:disabled {
   padding: 0;
   max-width: 720px;
   border: 1px solid var(--border);
-  border-top: none;
   /* Browsing a state can return 50+ members; scroll instead of pushing the
      page down by a couple of thousand pixels. */
   max-height: 320px;
@@ -118,7 +150,7 @@ select:disabled {
   align-items: center;
   justify-content: center;
   padding: 16px;
-  background: #f3f2ee;
+  background: #f1f1f1;
   border-radius: 18px;
 }
 
@@ -140,8 +172,8 @@ select:disabled {
 }
 
 .member-map path {
-  fill: #d9d7d0;
-  stroke: #f3f2ee;
+  fill: var(--border);
+  stroke: #f1f1f1;
   stroke-width: 0.7;
   stroke-linejoin: round;
 }
@@ -150,8 +182,8 @@ select:disabled {
    low — the stroke dilates the shape, so a heavy one reads as a blob rather than
    the district's actual outline. */
 .member-map path.is-active {
-  fill: var(--ink);
-  stroke: var(--ink);
+  fill: var(--district-highlight);
+  stroke: var(--district-highlight);
   stroke-width: 1;
   stroke-linejoin: miter;
 }
@@ -173,7 +205,7 @@ select:disabled {
 
 .member-facts {
   font-size: 17px;
-  color: #666;
+  color: #000000;
   margin-top: 10px;
 }
 
@@ -234,10 +266,10 @@ main {
 }
 
 .focus-areas-section {
-  --fa-rule: #e7e2d7;
+  --fa-rule: #e4e4e4;
   margin-top: 14px;
   padding: 20px 24px 0;
-  background: #f8f6f1;
+  background: #f5f5f5;
   border: 1px solid var(--fa-rule);
   border-radius: 14px;
 }
@@ -269,7 +301,7 @@ main {
 
 .focus-areas-meta {
   font-size: 13px;
-  color: #8d8579;
+  color: #868686;
   font-variant-numeric: tabular-nums;
 }
 
@@ -284,7 +316,7 @@ main {
   align-items: baseline;
   gap: 7px;
   font-size: 13px;
-  color: #8d8579;
+  color: #8c8c8c;
   font-style: italic;
 }
 
@@ -328,6 +360,39 @@ main {
   border-bottom: 1px solid var(--fa-rule);
 }
 
+/* An icon control, not another button on the page — it's revealing more of a
+   list already on screen, not a separate action. Its accessible name (set in
+   JS) carries what a label would otherwise say. */
+.focus-areas-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin: 8px auto 2px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.focus-areas-toggle:hover {
+  background: var(--accent-2);
+}
+
+.focus-areas-toggle svg {
+  width: 18px;
+  height: 18px;
+  transition: transform 0.15s ease;
+}
+
+/* Points down (more below) collapsed, up (collapse it) expanded. */
+.focus-areas-toggle.is-expanded svg {
+  transform: rotate(180deg);
+}
+
 .focus-area-item {
   display: grid;
   grid-template-columns: minmax(0, 33%) minmax(0, 1fr);
@@ -362,7 +427,7 @@ main {
 
 .focus-area-count {
   font-weight: 400;
-  color: #a49c8d;
+  color: #9f9f9f;
 }
 
 .focus-area-desc {
@@ -371,7 +436,7 @@ main {
   /* Holds one line's height while the labels are still being generated, so the
      row doesn't jump when they land. */
   min-height: 1.5em;
-  color: #6f6a61;
+  color: #5f5f5f;
 }
 
 /* The placeholder occupies the description column only while the section is
@@ -391,7 +456,7 @@ main {
 .focus-area-skeleton-bar {
   height: 9px;
   border-radius: 4px;
-  background: linear-gradient(90deg, #ebe6db 25%, #f6f3ec 50%, #ebe6db 75%);
+  background: linear-gradient(90deg, #e4e4e4 25%, #f2f2f2 50%, #e4e4e4 75%);
   background-size: 240% 100%;
   animation: focus-shimmer 1.4s ease-in-out infinite;
 }
@@ -417,13 +482,18 @@ main {
 }
 
 .focus-area-sep {
-  color: #bdb5a6;
+  color: #bcbcbc;
 }
 
 .focus-area-list-item {
   cursor: pointer;
   text-decoration-color: transparent;
   transition: color 0.12s ease, text-decoration-color 0.12s ease;
+}
+
+.focus-area-list-item-law {
+  color: #1e7e34;
+  font-weight: 700;
 }
 
 /* A pinned item holds exactly the hover appearance — same rule, so the two can't
@@ -434,6 +504,11 @@ main {
   text-decoration: underline dotted;
   text-underline-offset: 3px;
   text-decoration-color: var(--accent);
+}
+
+.focus-area-list-item-law:hover,
+.focus-area-list-item-law.bill-pinned {
+  color: #1e7e34;
 }
 
 .timeline {
@@ -466,7 +541,7 @@ main {
   right: 10px;
   top: 21px;
   height: 1px;
-  background: #e0d7c7;
+  background: #cecece;
   z-index: 0;
 }
 
@@ -487,8 +562,8 @@ main {
   width: 13px;
   height: 13px;
   border-radius: 50%;
-  border: 2px solid #e0d7c7;
-  background: #fdfaf4;
+  border: 2px solid var(--ink);
+  background: var(--ink);
   transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease,
     box-shadow 0.15s ease;
 }
@@ -496,7 +571,7 @@ main {
 .timeline-label {
   font-size: 11px;
   letter-spacing: 0.06em;
-  color: #4b4338;
+  color: var(--ink);
   transition: color 0.15s ease, font-weight 0.15s ease;
 }
 
@@ -541,12 +616,12 @@ main {
 }
 
 .timeline-year:disabled .timeline-dot {
-  border-color: #ece5d8;
+  border-color: #dbdbdb;
   background: transparent;
 }
 
 .timeline-year:disabled .timeline-label {
-  color: #c9c0b1;
+  color: #c7c7c7;
 }
 
 .grid {
@@ -595,11 +670,11 @@ main {
   margin-left: 8px;
   padding: 1px 6px;
   border-radius: 999px;
-  border: 1px solid #d8cfc0;
+  border: 1px solid #cdcdcd;
   font-size: 9px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: #7a7266;
+  color: #717171;
 }
 
 .muted {
@@ -686,68 +761,91 @@ main {
   z-index: 1000;
   background: #fff;
   border: 1px solid var(--border);
-  padding: 10px 14px;
-  font-size: 12px;
-  max-width: 320px;
+  padding: 25px 25px;
+  font-size: 15px;
+  max-width: 520px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
   pointer-events: none;
   line-height: 1.5;
+  /* positionAt caps max-height against the viewport; without this a tooltip
+     taller than the window would clip its last lines instead of scrolling.
+     Only reachable once pinned — a hovering tooltip ignores pointer events. */
+  overflow-y: auto;
 }
 
 /* A hover tooltip chases the cursor, so it must not intercept clicks. A pinned
    one is parked and holds the only clickable thing in the card. */
+/* Fixed positioning tracks the viewport, so a hover tooltip stays put as the
+   cursor holds still. Once pinned it should instead stay anchored to the bill
+   it describes, scrolling the page with it rather than floating in place. */
 .bill-tooltip.is-pinned {
+  position: absolute;
   pointer-events: auto;
 }
 
+/* Floated (and placed first in the markup) so it carves out the top-right
+   corner and only the category/title lines that actually run alongside it
+   narrow to avoid it — the rest of the tooltip flows full-width beneath. */
 .tt-action {
-  color: #6f6a61;
-  font-size: 11px;
-  margin-top: 3px;
+  float: right;
+  margin-left: 16px;
+  margin-bottom: 8px;
+  max-width: 45%;
 }
 
-.tt-action-label {
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 9px;
-  color: #8d8579;
-  margin-right: 3px;
-}
-
-.tt-link {
+.tt-status-badge {
   display: inline-block;
-  margin-top: 6px;
+  background: #f0f0f0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  color: #696969;
   font-size: 11px;
-  color: var(--accent);
-  text-decoration: none;
+  font-weight: 400;
+  font-style: normal;
+  white-space: normal;
+  text-align: right;
 }
 
-.bill-tooltip.is-pinned .tt-link {
-  text-decoration: underline;
+
+/* Matches .tt-primary's own color/weight so the link reads as the title, not as
+   a separate blue element — only the arrow marks it as a link. */
+.tt-title-link {
+  color: inherit;
+  font-weight: inherit;
+  text-decoration: none;
+  cursor: default;
+}
+
+/* The tooltip itself only accepts pointer events once pinned (see
+   .bill-tooltip.is-pinned), so the link isn't actually clickable before then —
+   the underline and pointer cursor wait for the same state. */
+.bill-tooltip.is-pinned .tt-title-link {
+  cursor: pointer;
   text-underline-offset: 2px;
 }
 
-/* The hint is only true before pinning; once pinned the link is live. */
-.tt-link-hint {
-  color: #8d8579;
-}
-
-.bill-tooltip.is-pinned .tt-link-hint {
-  display: none;
+.tt-external-icon {
+  width: 0.7em;
+  height: 0.7em;
+  margin-left: 3px;
+  vertical-align: -0.05em;
+  color: var(--accent);
 }
 
 .tt-category {
-  font-size: 10px;
-  font-weight: 700;
+  font-size: 11px;
+  font-weight: 400;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  margin-bottom: 4px;
+  margin-bottom: 8px;
 }
 
 .tt-primary {
   font-weight: 600;
-  margin-bottom: 4px;
+  margin-bottom: 8px;
 }
+
 
 .tt-bill-id {
   font-variant-numeric: tabular-nums;
@@ -755,19 +853,27 @@ main {
 }
 
 .tt-summary {
-  font-style: italic;
-  margin-bottom: 4px;
+  font-size: 14px;
+  font-weight: 400;
+  font-style: normal;
+  margin-bottom: 8px;
+  clear: right;
 }
 
 .tt-secondary {
   color: #666;
-  font-size: 11px;
-  margin-bottom: 4px;
+  font-size: 14px;
+  font-weight: 400;
+  font-style: normal;
+  margin-bottom: 8px;
 }
 
 .tt-date {
-  color: #999;
-  font-size: 10px;
+  font-size: 14px;
+  font-weight: 400;
+  font-style: normal;
+  margin-bottom: 8px;
+  clear: right;
 }
 
 

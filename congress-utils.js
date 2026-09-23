@@ -87,6 +87,59 @@ async function getBillDescriptions(bills) {
   return { checked: refs.length, bySource: bySource || {} };
 }
 
+// House and Senate origins are told apart by the bill type prefix alone — no
+// separate lookup needed.
+const CHAMBER_BY_TYPE = {
+  HR: "House", HRES: "House", HJRES: "House", HCONRES: "House",
+  S: "Senate", SRES: "Senate", SJRES: "Senate", SCONRES: "Senate",
+};
+
+// "Agreed to" in one of a bill's own actions is that chamber voting to pass it;
+// "Received in"/"Received by" the other chamber is that chamber's confirmation
+// the bill arrived after passing its chamber of origin. Either one means the
+// origin chamber has passed it, so they're folded into a single flag here — the
+// sponsored-legislation list only carries `latestAction`, so this needs each
+// bill's full action history, one request per bill.
+const AGREED_TO_RE = /\bagreed to\b/i;
+const RECEIVED_BY_OTHER_CHAMBER_RE = /\breceived (in|by)\b/i;
+
+async function getBillChamberPassage(bill) {
+  if (!(bill?.congress && bill?.type && bill?.number != null)) return;
+  const path = `bill/${bill.congress}/${String(bill.type).toLowerCase()}/${bill.number}/actions`;
+
+  let passed = false;
+  for await (const page of paginate(path, { limit: 250 })) {
+    for (const action of coerceList(page.actions)) {
+      const text = action?.text || "";
+      if (AGREED_TO_RE.test(text) || RECEIVED_BY_OTHER_CHAMBER_RE.test(text)) {
+        passed = true;
+        break;
+      }
+    }
+    if (passed) break;
+  }
+
+  bill._passedChamber = passed;
+  bill._chamber = CHAMBER_BY_TYPE[String(bill.type).toUpperCase()] || "";
+}
+
+// Runs a bounded number of these at once — one request per bill would otherwise
+// mean dozens of concurrent fetches for a busy sponsor.
+async function getBillsChamberPassage(bills, concurrency = 6) {
+  const refs = bills.filter((b) => b?.congress && b?.type && b?.number != null);
+  let i = 0;
+  const worker = async () => {
+    while (i < refs.length) {
+      const bill = refs[i++];
+      await getBillChamberPassage(bill).catch((err) => {
+        console.error(`bill actions failed for ${billKey(bill)}: ${err?.message ?? err}`);
+      });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, refs.length) }, worker));
+  return { checked: refs.length };
+}
+
 // Chamber-wide counts are keyed only by congress, so they're identical for every
 // member and every year within one. Cache the promise rather than the value, so
 // concurrent callers share a single request instead of racing duplicates.
@@ -133,4 +186,4 @@ async function searchMembers({ congress, q, state, district } = {}) {
   return res.json();
 }
 
-export { getMemberDetails, getSponsoredLegislation, getBillDescriptions, countBillsByPolicyArea, searchMembers };
+export { getMemberDetails, getSponsoredLegislation, getBillDescriptions, getBillsChamberPassage, countBillsByPolicyArea, searchMembers };

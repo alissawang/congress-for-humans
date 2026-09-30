@@ -88,7 +88,7 @@ import {
   fitShapeToCount,
 } from "./utils.js";
 import { summarizeBillsWithClaude, getFocusAreas } from "./claude-utils.js";
-import { getMemberDetails, getSponsoredLegislation, getBillDescriptions, getBillsChamberPassage, countBillsByPolicyArea, searchMembers } from "./congress-utils.js";
+import { getMemberDetails, getSponsoredLegislation, getBillDescriptions, getBillsChamberPassage, recordBillStage, emptyBillStages, CHAMBER_BY_TYPE, countBillsByPolicyArea, searchMembers } from "./congress-utils.js";
 
 function mutedColor(hex) {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -164,10 +164,6 @@ document.addEventListener("click", (e) => {
 // CRS summaries run to a few hundred words — far more than a hover card can hold.
 // Cut at a word boundary so the visible text never ends mid-word.
 const CRS_TOOLTIP_MAX_CHARS = 320;
-// Referral actions naming several committees run past 300 characters, which is
-// more rows than the rest of the card put together.
-const ACTION_TOOLTIP_MAX_CHARS = 140;
-
 // Mirrors .bill-tooltip's max-width. Kept here too because positionAt caps the
 // tooltip against the viewport before measuring it, and a fixed CSS width can't
 // react to a window narrower than the tooltip itself.
@@ -195,16 +191,65 @@ const EXTERNAL_LINK_ICON =
   '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>' +
   '<polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
 
-// A referral is the fate of ~90%+ of bills and never says more than which
-// committee — the House/Senate phrasing and multi-committee lists differ, but
-// "went to a committee" is the whole content. Collapse all of it to one word so
-// only a bill that moved further shows real text here.
-const REFERRAL_ACTION_RE = /^referred to\b|read twice and referred\b|introductory remarks\b/i;
-const PUBLIC_LAW_ACTION_RE = /became public law/i;
+const STEP_CHECK_ICON =
+  '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 12.5 10 17.5 19 7"/></svg>';
 
-function simplifyActionText(text) {
-  if (PUBLIC_LAW_ACTION_RE.test(text)) return "Became Public Law";
-  return REFERRAL_ACTION_RE.test(text) ? "Referred to Committee" : text;
+// Simple resolutions only ever go through their own chamber, and concurrent
+// resolutions never go to the President — the tracker only lists stages a bill
+// of its type can actually reach. Otherwise the chamber of origin comes first.
+const SIMPLE_RESOLUTION_TYPES = new Set(["HRES", "SRES"]);
+const CONCURRENT_RESOLUTION_TYPES = new Set(["HCONRES", "SCONRES"]);
+
+function billStageTracker(bill) {
+  const type = String(bill.type || "").toUpperCase();
+  const origin = CHAMBER_BY_TYPE[type] || "House";
+  const other = origin === "House" ? "Senate" : "House";
+  // bill._stages lands after the tooltip's first paint (see
+  // getBillsChamberPassage); until then latestAction alone is the best guess.
+  const stages = bill._stages || recordBillStage(emptyBillStages(), bill.latestAction);
+
+  const steps = [{ label: "Introduced", reached: true }];
+  steps.push({ label: `Passed ${origin}`, reached: stages.passed.has(origin) });
+  if (!SIMPLE_RESOLUTION_TYPES.has(type)) {
+    steps.push({ label: `Passed ${other}`, reached: stages.passed.has(other) });
+    if (!CONCURRENT_RESOLUTION_TYPES.has(type)) {
+      steps.push({ label: "To President", reached: stages.president });
+      steps.push({ label: "Became Law", reached: stages.law });
+    }
+  }
+  // A later stage implies every earlier one, even where the action history
+  // skips saying so, so the furthest one reached is the bill's current stage.
+  let current = 0;
+  steps.forEach((step, i) => { if (step.reached) current = i; });
+
+  return (
+    `<ol class="tt-tracker">` +
+    steps
+      .map((step, i) => {
+        const cls = `tt-bill-status${i <= current ? " is-reached" : ""}${i === current ? " is-current" : ""}`;
+        return (
+          `<li class="${cls}"${i === current ? ' aria-current="step"' : ""}>` +
+          `<span class="tt-bill-status-dot">${i <= current ? STEP_CHECK_ICON : ""}</span>` +
+          `<span class="tt-bill-status-label">${escapeHtml(step.label)}</span></li>`
+        );
+      })
+      .join("") +
+    `</ol>`
+  );
+}
+
+// The end dots sit centred over their labels, and those labels start and end
+// at the tooltip's text margins — so each end dot is inset by half its label's
+// width, which only a measurement can tell. Must run once the tooltip is shown.
+function alignTrackerEnds(tooltip) {
+  const tracker = tooltip.querySelector(".tt-tracker");
+  if (!tracker) return;
+  const inset = (label, dot) => `${Math.max(0, (label.offsetWidth - dot.offsetWidth) / 2)}px`;
+  const first = tracker.firstElementChild;
+  const last = tracker.lastElementChild;
+  tracker.style.paddingLeft = inset(first.querySelector(".tt-bill-status-label"), first.querySelector(".tt-bill-status-dot"));
+  tracker.style.paddingRight = inset(last.querySelector(".tt-bill-status-label"), last.querySelector(".tt-bill-status-dot"));
 }
 
 function attachBillTooltip(el, bill, color, category, tooltip) {
@@ -213,43 +258,13 @@ function attachBillTooltip(el, bill, color, category, tooltip) {
   const billId = formatBillId(bill);
   const introduced = bill.introducedDate || "";
   const pageUrl = billPageUrl(bill);
-  const actionText = bill.latestAction?.text || "";
-  const actionDate = bill.latestAction?.actionDate || "";
 
   const render = () => {
     // The generated line is a condensed version of the description below it, so
     // it supersedes it. Until it arrives the raw description beats nothing.
     const summary =
       bill._summary || (bill._description ? truncateForTooltip(bill._description.text) : "");
-    // Chamber passage (from the bill's full action history, fetched separately —
-    // see getBillsChamberPassage) outranks the raw latest-action text: becoming
-    // law beats having passed a chamber, which beats whatever the action itself
-    // says. bill._passedChamber lands after the tooltip's first paint, so this is
-    // read fresh on every render rather than hoisted at attach time.
-    const isLaw = /became public law/i.test(actionText);
-    const simplifiedAction = isLaw
-      ? "Became Public Law"
-      : bill._passedChamber && bill._chamber
-      ? `Passed ${bill._chamber}`
-      : simplifyActionText(actionText);
-    // Seven in ten bills were last acted on the day they were introduced, so the
-    // date is only worth a line when it says something the one above doesn't. A
-    // referral's or chamber-passage's date says only when that milestone landed,
-    // not what happened — dropping it leaves the status to speak for itself.
-    const showActionDate =
-      actionDate &&
-      actionDate !== introduced &&
-      simplifiedAction !== "Referred to Committee" &&
-      simplifiedAction !== `Passed ${bill._chamber}`;
     tooltip.innerHTML =
-      // Floated first so it carves out the corner and only the lines that
-      // actually run alongside it wrap around its width, rather than every
-      // line below reserving space for it whether or not they need to.
-      (actionText
-        ? `<div class="tt-action"><span class="tt-status-badge">` +
-          (showActionDate ? `${escapeHtml(actionDate)} · ` : "") +
-          `${escapeHtml(truncateForTooltip(simplifiedAction, ACTION_TOOLTIP_MAX_CHARS))}</span></div>`
-        : "") +
       `<div class="tt-category" style="color:${color}">${escapeHtml(category)}</div>` +
       `<div class="tt-primary">` +
         (billId ? `<span class="tt-bill-id">${escapeHtml(billId)}</span> ` : "") +
@@ -264,8 +279,10 @@ function attachBillTooltip(el, bill, color, category, tooltip) {
         `</div>` +
       (introduced ? `<div class="tt-date">${escapeHtml(introduced)}</div>` : "") +
       (summary ? `<div class="tt-summary">${escapeHtml(summary)}</div>` : "") +
-      (secondary ? `<div class="tt-secondary">${escapeHtml(secondary)}</div>` : "");
+      (secondary ? `<div class="tt-secondary">${escapeHtml(secondary)}</div>` : "") +
+      billStageTracker(bill);
     tooltip.style.display = "block";
+    alignTrackerEnds(tooltip);
   };
 
   const positionAt = (clientX, clientY) => {
@@ -804,7 +821,7 @@ async function renderYearView(bioguideId, group) {
       if (token === billViewToken && areaTexts) renderFocusAreas(topGroups, areaTexts, group.bills, extraGroups);
     }
   );
-  // Tooltips read bill._passedChamber/_chamber at hover time, same as summaries,
+  // Tooltips read bill._stages at hover time, same as summaries,
   // so this needs no re-render either — just a refresh for whichever tooltip is
   // pinned when it lands.
   const chamberPassage = track("chamber passage", getBillsChamberPassage(group.bills)).then(() => {

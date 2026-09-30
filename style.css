@@ -789,28 +789,130 @@ main {
   pointer-events: auto;
 }
 
-/* Floated (and placed first in the markup) so it carves out the top-right
-   corner and only the category/title lines that actually run alongside it
-   narrow to avoid it — the rest of the tooltip flows full-width beneath. */
-.tt-action {
-  float: right;
-  margin-left: 16px;
-  margin-bottom: 8px;
-  max-width: 45%;
+/* Styled after the congress-years timeline: a rule with a dot per stage the
+   bill can reach. Each step draws the stretch of rule leading into it from the
+   previous dot, so that stretch can turn green once the step is reached.
+   The end steps take half a column each with their dots at the outer edge,
+   which keeps the dots evenly spaced; alignTrackerEnds (site.js) then pads the
+   row so the end labels, centred on those dots, meet the text margins. */
+.tt-tracker {
+  --step-dot: 16px;
+  --step-reached: #2e9e4f;
+  display: flex;
+  list-style: none;
+  margin: 24px 0 2px;
+  padding: 0;
 }
 
-.tt-status-badge {
-  display: inline-block;
-  background: #f0f0f0;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 2px 8px;
-  color: #696969;
+.tt-bill-status {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  position: relative;
+  min-width: 0;
+}
+
+.tt-bill-status:first-child,
+.tt-bill-status:last-child {
+  flex-grow: 0.5;
+}
+
+.tt-bill-status:first-child {
+  align-items: flex-start;
+}
+
+.tt-bill-status:last-child {
+  align-items: flex-end;
+}
+
+/* Rule from the previous dot's centre to this one's. Middle steps are a full
+   column wide with centred dots; the end steps are half a column with their
+   dots pushed to the outer edge, which shifts the endpoints accordingly. */
+.tt-bill-status:not(:first-child)::before {
+  content: "";
+  position: absolute;
+  top: calc(var(--step-dot) / 2);
+  left: -50%;
+  right: 50%;
+  height: 2px;
+  margin-top: -1px;
+  background: #dbdbdb;
+  z-index: 0;
+}
+
+.tt-bill-status:nth-child(2)::before {
+  left: calc(-50% + var(--step-dot) / 2);
+}
+
+.tt-bill-status:last-child::before {
+  left: -100%;
+  right: calc(var(--step-dot) / 2);
+}
+
+.tt-bill-status:last-child:nth-child(2)::before {
+  left: calc(-100% + var(--step-dot) / 2);
+}
+
+.tt-bill-status.is-reached::before {
+  background: var(--step-reached);
+}
+
+.tt-bill-status-dot {
+  width: var(--step-dot);
+  height: var(--step-dot);
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 2px solid #dbdbdb;
+  background: #fff;
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+
+.tt-bill-status.is-reached .tt-bill-status-dot {
+  border-color: var(--step-reached);
+  background: var(--step-reached);
+}
+
+.tt-bill-status-dot svg {
+  width: 10px;
+  height: 10px;
+}
+
+.tt-bill-status-label {
   font-size: 11px;
   font-weight: 400;
   font-style: normal;
-  white-space: normal;
-  text-align: right;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  text-align: center;
+  color: #c7c7c7;
+}
+
+/* The end dots sit at their columns' outer edges, so their labels are shifted
+   outward to centre on them — into the padding alignTrackerEnds adds. A
+   transform leaves the measured width alone, and nowrap keeps it one line. */
+.tt-bill-status:first-child .tt-bill-status-label {
+  white-space: nowrap;
+  transform: translateX(calc(-50% + var(--step-dot) / 2));
+}
+
+.tt-bill-status:last-child .tt-bill-status-label {
+  white-space: nowrap;
+  transform: translateX(calc(50% - var(--step-dot) / 2));
+}
+
+.tt-bill-status.is-reached .tt-bill-status-label {
+  color: var(--ink);
+}
+
+.tt-bill-status.is-current .tt-bill-status-label {
+  font-weight: 700;
 }
 
 
@@ -863,7 +965,6 @@ main {
   font-weight: 400;
   font-style: normal;
   margin-bottom: 8px;
-  clear: right;
 }
 
 .tt-secondary {
@@ -879,7 +980,6 @@ main {
   font-weight: 400;
   font-style: normal;
   margin-bottom: 8px;
-  clear: right;
 }
 
 

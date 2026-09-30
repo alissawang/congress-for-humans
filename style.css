@@ -60,6 +60,12 @@ select {
   color: var(--ink);
   cursor: pointer;
   min-width: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 32px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' width='10' height='10'%3E%3Cpath d='M2 5l6 6 6-6' fill='none' stroke='%23777' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
 }
 
 .member-query-wrap {
@@ -374,7 +380,7 @@ main {
   border: none;
   border-radius: 50%;
   background: none;
-  color: var(--accent);
+  color: var(--ink);
   cursor: pointer;
 }
 

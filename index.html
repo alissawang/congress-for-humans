@@ -10,7 +10,14 @@
     <header>
       <h1>Track Your Congressmember</h1>
       <div class="controls">
-        <input id="member-query" placeholder="Search by name…" aria-label="Member name" autocomplete="off" />
+        <div class="member-query-wrap">
+          <input id="member-query" placeholder="Search by name…" aria-label="Member name" autocomplete="off" />
+          <button id="member-query-toggle" type="button" class="member-query-toggle" aria-label="Show results">
+            <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true">
+              <path d="M2 5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+        </div>
         <select id="member-state" aria-label="State">
           <option value="">State</option>
           <option value="Alabama">Alabama</option>
@@ -105,6 +112,7 @@
         </div>
         <div id="focus-areas-bar" class="focus-areas-bar" role="img"></div>
         <ul id="focus-areas" class="focus-areas"></ul>
+        <button id="focus-areas-toggle" class="focus-areas-toggle" type="button" hidden></button>
       </div>
     </header>
 

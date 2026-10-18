@@ -87,6 +87,76 @@ async function getBillDescriptions(bills) {
   return { checked: refs.length, bySource: bySource || {} };
 }
 
+// House and Senate origins are told apart by the bill type prefix alone — no
+// separate lookup needed.
+const CHAMBER_BY_TYPE = {
+  HR: "House", HRES: "House", HJRES: "House", HCONRES: "House",
+  S: "Senate", SRES: "Senate", SJRES: "Senate", SCONRES: "Senate",
+};
+
+// A chamber's own passage action names it ("Passed/agreed to in Senate",
+// "Passed House with an amendment"); "Received in the House" is the House
+// confirming the bill arrived after the *Senate* passed it, so it credits the
+// other chamber. Bare "agreed to" is left alone — amendments are "agreed to" too.
+const PASSED_IN_RE = /\b(?:passed\/agreed to|resolution agreed to) in (?:the )?(house|senate)\b|^passed (house|senate)\b/i;
+const RECEIVED_IN_RE = /\breceived in the (house|senate)\b/i;
+const PRESENTED_RE = /\bpresented to (?:the )?president\b/i;
+const BECAME_LAW_RE = /\bbecame (?:public|private) law\b|\bsigned by (?:the )?president\b/i;
+
+const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+
+// Folds one action into the running set of stages a bill has reached. Exported
+// so the tooltip can classify a bill's latestAction alone while the full history
+// is still loading.
+function recordBillStage(stages, action) {
+  const text = action?.text || "";
+  const passedIn = text.match(PASSED_IN_RE);
+  if (passedIn) stages.passed.add(capitalize(passedIn[1] || passedIn[2]));
+  const received = text.match(RECEIVED_IN_RE);
+  if (received) stages.passed.add(received[1].toLowerCase() === "house" ? "Senate" : "House");
+  if (action?.type === "President" || PRESENTED_RE.test(text)) stages.president = true;
+  if (action?.type === "BecameLaw" || BECAME_LAW_RE.test(text)) stages.law = true;
+  return stages;
+}
+
+function emptyBillStages() {
+  return { passed: new Set(), president: false, law: false };
+}
+
+// The sponsored-legislation list only carries `latestAction`, so which chambers
+// a bill cleared needs its full action history, one request per bill.
+async function getBillChamberPassage(bill) {
+  if (!(bill?.congress && bill?.type && bill?.number != null)) return;
+  const path = `bill/${bill.congress}/${String(bill.type).toLowerCase()}/${bill.number}/actions`;
+
+  const stages = emptyBillStages();
+  for await (const page of paginate(path, { limit: 250 })) {
+    for (const action of coerceList(page.actions)) recordBillStage(stages, action);
+    // Becoming law is the last stage, so nothing further back can change it.
+    if (stages.law) break;
+  }
+
+  bill._stages = stages;
+  bill._chamber = CHAMBER_BY_TYPE[String(bill.type).toUpperCase()] || "";
+}
+
+// Runs a bounded number of these at once — one request per bill would otherwise
+// mean dozens of concurrent fetches for a busy sponsor.
+async function getBillsChamberPassage(bills, concurrency = 6) {
+  const refs = bills.filter((b) => b?.congress && b?.type && b?.number != null);
+  let i = 0;
+  const worker = async () => {
+    while (i < refs.length) {
+      const bill = refs[i++];
+      await getBillChamberPassage(bill).catch((err) => {
+        console.error(`bill actions failed for ${billKey(bill)}: ${err?.message ?? err}`);
+      });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, refs.length) }, worker));
+  return { checked: refs.length };
+}
+
 // Chamber-wide counts are keyed only by congress, so they're identical for every
 // member and every year within one. Cache the promise rather than the value, so
 // concurrent callers share a single request instead of racing duplicates.
@@ -133,4 +203,4 @@ async function searchMembers({ congress, q, state, district } = {}) {
   return res.json();
 }
 
-export { getMemberDetails, getSponsoredLegislation, getBillDescriptions, countBillsByPolicyArea, searchMembers };
+export { getMemberDetails, getSponsoredLegislation, getBillDescriptions, getBillsChamberPassage, recordBillStage, emptyBillStages, CHAMBER_BY_TYPE, countBillsByPolicyArea, searchMembers };

@@ -59,7 +59,7 @@ import {
   SCIENCE_BASE,
   ENVIRONMENT_BASE,
   EDUCATION_CAP_BASE,
-  CRIME_SIREN_BASE,
+  CRIME_BADGE_BASE,
   ARMED_FORCES_BASE,
   ENERGY_BOLT_BASE,
   LABOR_BASE,
@@ -76,7 +76,7 @@ import {
   ECONOMICS_CHART_BASE,
   EMERGENCY_ALERT_BASE,
   FAMILIES_HEART_BASE,
-  FINANCE_COINS_BASE,
+  FINANCE_BASE,
   FOREIGN_TRADE_SHIP_BASE,
   LAW_SCALES_BASE,
   NATIVE_AMERICANS_BASE,
@@ -88,7 +88,7 @@ import {
   fitShapeToCount,
 } from "./utils.js";
 import { summarizeBillsWithClaude, getFocusAreas } from "./claude-utils.js";
-import { getMemberDetails, getSponsoredLegislation, getBillDescriptions, countBillsByPolicyArea, searchMembers } from "./congress-utils.js";
+import { getMemberDetails, getSponsoredLegislation, getBillDescriptions, getBillsChamberPassage, recordBillStage, emptyBillStages, CHAMBER_BY_TYPE, countBillsByPolicyArea, searchMembers } from "./congress-utils.js";
 
 function mutedColor(hex) {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -164,9 +164,11 @@ document.addEventListener("click", (e) => {
 // CRS summaries run to a few hundred words — far more than a hover card can hold.
 // Cut at a word boundary so the visible text never ends mid-word.
 const CRS_TOOLTIP_MAX_CHARS = 320;
-// Referral actions naming several committees run past 300 characters, which is
-// more rows than the rest of the card put together.
-const ACTION_TOOLTIP_MAX_CHARS = 140;
+// Mirrors .bill-tooltip's max-width. Kept here too because positionAt caps the
+// tooltip against the viewport before measuring it, and a fixed CSS width can't
+// react to a window narrower than the tooltip itself.
+const TOOLTIP_MAX_WIDTH = 520;
+const TOOLTIP_EDGE_PAD = 14;
 
 function truncateForTooltip(text, max = CRS_TOOLTIP_MAX_CHARS) {
   if (text.length <= max) return text;
@@ -181,17 +183,81 @@ function escapeHtml(text) {
   ));
 }
 
+// The boxed arrow (not a bare "↗") is what marks the title as a link out to
+// another site, so it's drawn rather than left to a font's arbitrary glyph.
+const EXTERNAL_LINK_ICON =
+  '<svg class="tt-external-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" ' +
+  'stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>' +
+  '<polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
+
+const STEP_CHECK_ICON =
+  '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 12.5 10 17.5 19 7"/></svg>';
+
+// Simple resolutions only ever go through their own chamber, and concurrent
+// resolutions never go to the President — the tracker only lists stages a bill
+// of its type can actually reach. Otherwise the chamber of origin comes first.
+const SIMPLE_RESOLUTION_TYPES = new Set(["HRES", "SRES"]);
+const CONCURRENT_RESOLUTION_TYPES = new Set(["HCONRES", "SCONRES"]);
+
+function billStageTracker(bill) {
+  const type = String(bill.type || "").toUpperCase();
+  const origin = CHAMBER_BY_TYPE[type] || "House";
+  const other = origin === "House" ? "Senate" : "House";
+  // bill._stages lands after the tooltip's first paint (see
+  // getBillsChamberPassage); until then latestAction alone is the best guess.
+  const stages = bill._stages || recordBillStage(emptyBillStages(), bill.latestAction);
+
+  const steps = [{ label: "Introduced", reached: true }];
+  steps.push({ label: `Passed ${origin}`, reached: stages.passed.has(origin) });
+  if (!SIMPLE_RESOLUTION_TYPES.has(type)) {
+    steps.push({ label: `Passed ${other}`, reached: stages.passed.has(other) });
+    if (!CONCURRENT_RESOLUTION_TYPES.has(type)) {
+      steps.push({ label: "To President", reached: stages.president });
+      steps.push({ label: "Became Law", reached: stages.law });
+    }
+  }
+  // A later stage implies every earlier one, even where the action history
+  // skips saying so, so the furthest one reached is the bill's current stage.
+  let current = 0;
+  steps.forEach((step, i) => { if (step.reached) current = i; });
+
+  return (
+    `<ol class="tt-tracker">` +
+    steps
+      .map((step, i) => {
+        const cls = `tt-bill-status${i <= current ? " is-reached" : ""}${i === current ? " is-current" : ""}`;
+        return (
+          `<li class="${cls}"${i === current ? ' aria-current="step"' : ""}>` +
+          `<span class="tt-bill-status-dot">${i <= current ? STEP_CHECK_ICON : ""}</span>` +
+          `<span class="tt-bill-status-label">${escapeHtml(step.label)}</span></li>`
+        );
+      })
+      .join("") +
+    `</ol>`
+  );
+}
+
+// The end dots sit centred over their labels, and those labels start and end
+// at the tooltip's text margins — so each end dot is inset by half its label's
+// width, which only a measurement can tell. Must run once the tooltip is shown.
+function alignTrackerEnds(tooltip) {
+  const tracker = tooltip.querySelector(".tt-tracker");
+  if (!tracker) return;
+  const inset = (label, dot) => `${Math.max(0, (label.offsetWidth - dot.offsetWidth) / 2)}px`;
+  const first = tracker.firstElementChild;
+  const last = tracker.lastElementChild;
+  tracker.style.paddingLeft = inset(first.querySelector(".tt-bill-status-label"), first.querySelector(".tt-bill-status-dot"));
+  tracker.style.paddingRight = inset(last.querySelector(".tt-bill-status-label"), last.querySelector(".tt-bill-status-dot"));
+}
+
 function attachBillTooltip(el, bill, color, category, tooltip) {
   const primary = makePrimaryName(bill);
   const secondary = makeSecondaryName(bill, primary);
   const billId = formatBillId(bill);
   const introduced = bill.introducedDate || "";
   const pageUrl = billPageUrl(bill);
-  const actionText = bill.latestAction?.text || "";
-  const actionDate = bill.latestAction?.actionDate || "";
-  // Seven in ten bills were last acted on the day they were introduced, so the
-  // date is only worth a line when it says something the one above doesn't.
-  const showActionDate = actionDate && actionDate !== introduced;
 
   const render = () => {
     // The generated line is a condensed version of the description below it, so
@@ -202,32 +268,61 @@ function attachBillTooltip(el, bill, color, category, tooltip) {
       `<div class="tt-category" style="color:${color}">${escapeHtml(category)}</div>` +
       `<div class="tt-primary">` +
         (billId ? `<span class="tt-bill-id">${escapeHtml(billId)}</span> ` : "") +
-        `${escapeHtml(primary)}</div>` +
+        // The title itself is the link to congress.gov once pinned — see
+        // .tt-title-link, which only turns on pointer/underline styling then, the
+        // same as the tooltip's own pointer-events. The arrow marks it as a link
+        // even on hover, before it's actually clickable.
+        (pageUrl
+          ? `<a class="tt-title-link" href="${escapeHtml(pageUrl)}" target="_blank" rel="noopener noreferrer">` +
+            `${escapeHtml(primary)}${EXTERNAL_LINK_ICON}</a>`
+          : escapeHtml(primary)) +
+        `</div>` +
+      (introduced ? `<div class="tt-date">${escapeHtml(introduced)}</div>` : "") +
       (summary ? `<div class="tt-summary">${escapeHtml(summary)}</div>` : "") +
       (secondary ? `<div class="tt-secondary">${escapeHtml(secondary)}</div>` : "") +
-      (introduced ? `<div class="tt-date">Introduced ${escapeHtml(introduced)}</div>` : "") +
-      (actionText
-        ? `<div class="tt-action"><span class="tt-action-label">Latest action</span> ` +
-          (showActionDate ? `${escapeHtml(actionDate)} · ` : "") +
-          `${escapeHtml(truncateForTooltip(actionText, ACTION_TOOLTIP_MAX_CHARS))}</div>`
-        : "") +
-      // Only reachable once the tooltip is pinned — a hover tooltip tracks the
-      // cursor and ignores pointer events, so the hint says how to get to it.
-      (pageUrl
-        ? `<a class="tt-link" href="${pageUrl}" target="_blank" rel="noopener noreferrer">` +
-          `congress.gov<span class="tt-link-hint"> · click bill to open</span></a>`
-        : "");
+      billStageTracker(bill);
     tooltip.style.display = "block";
+    alignTrackerEnds(tooltip);
   };
 
   const positionAt = (clientX, clientY) => {
-    const pad = 14;
+    const pad = TOOLTIP_EDGE_PAD;
+    // clientWidth/Height exclude the scrollbars that innerWidth/Height count, so
+    // measuring against the latter lets the tooltip slip under one and clip.
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+
+    // Shrink to fit before measuring: in a window narrower than the tooltip,
+    // flipping sides can't help, because neither side has room for it.
+    const capW = `${Math.min(TOOLTIP_MAX_WIDTH, vw - pad * 2)}px`;
+    const capH = `${vh - pad * 2}px`;
+    // Only write when it actually changes — this runs on every mousemove, and a
+    // style write followed by the offsetWidth read below forces a sync layout.
+    if (tooltip.style.maxWidth !== capW) tooltip.style.maxWidth = capW;
+    if (tooltip.style.maxHeight !== capH) tooltip.style.maxHeight = capH;
+
     const tw = tooltip.offsetWidth;
     const th = tooltip.offsetHeight;
+
+    // Prefer below-right of the cursor, flipping to the far side when the
+    // preferred one would overflow.
     let x = clientX + pad;
     let y = clientY + pad;
-    if (x + tw > window.innerWidth) x = clientX - tw - pad;
-    if (y + th > window.innerHeight) y = clientY - th - pad;
+    if (x + tw > vw - pad) x = clientX - tw - pad;
+    if (y + th > vh - pad) y = clientY - th - pad;
+
+    // The flip alone can still land off-screen — cursor close to the far edge, or
+    // a tooltip taller than the viewport — so clamp into view as the last step.
+    // Low side wins the tie when it simply doesn't fit, pinning it to the edge.
+    x = Math.max(pad, Math.min(x, vw - tw - pad));
+    y = Math.max(pad, Math.min(y, vh - th - pad));
+    // A pinned tooltip is positioned absolute (page coordinates), so the
+    // viewport-relative x/y above need the scroll offset added; a hovering one
+    // stays fixed (viewport coordinates) and skips it.
+    if (tooltip.classList.contains("is-pinned")) {
+      x += window.scrollX;
+      y += window.scrollY;
+    }
     tooltip.style.left = `${x}px`;
     tooltip.style.top = `${y}px`;
   };
@@ -251,11 +346,11 @@ function attachBillTooltip(el, bill, color, category, tooltip) {
     if (pinnedEl === el) return;
     unpinTooltip();
     render();
+    tooltip.classList.add("is-pinned");
     positionAt(e.clientX, e.clientY);
     pinnedEl = el;
     pinnedRender = render;
     el.classList.add("bill-pinned");
-    tooltip.classList.add("is-pinned");
     skipNextDocumentClose = true;
   });
 }
@@ -288,6 +383,7 @@ const ui = {
   memberState: document.getElementById("member-state"),
   memberDistrict: document.getElementById("member-district"),
   searchBtn: document.getElementById("member-search-btn"),
+  memberQueryToggle: document.getElementById("member-query-toggle"),
   results: document.getElementById("member-results"),
   status: document.getElementById("status"),
   grid: document.getElementById("grid"),
@@ -302,6 +398,7 @@ const ui = {
   focusAreasBar: document.getElementById("focus-areas-bar"),
   focusAreasMeta: document.getElementById("focus-areas-meta"),
   focusAreasProgress: document.getElementById("focus-areas-progress"),
+  focusAreasToggle: document.getElementById("focus-areas-toggle"),
   memberMap: document.getElementById("member-map"),
   memberMapPanel: document.getElementById("member-map-panel"),
 };
@@ -347,11 +444,29 @@ function buildDescSkeleton(rowIndex) {
   return skeleton;
 }
 
-function renderFocusAreas(topGroups, areaTexts, yearBills = []) {
+// Categories past the top few are one-off enough that asking Claude to write a
+// bullet list for each of them isn't worth the calls — the bill's own title
+// stands in instead, so an expanded row costs nothing to render.
+const EXTRA_FOCUS_ITEM_MAX_CHARS = 60;
+
+// Populated by every renderFocusAreas call so the expand toggle can repaint
+// from the same data without re-fetching or re-summarizing anything.
+let focusAreasState = { topGroups: [], areaTexts: null, yearBills: [], extraGroups: [] };
+let focusAreasExpanded = false;
+
+function renderFocusAreas(topGroups, areaTexts, yearBills = [], extraGroups = []) {
+  focusAreasState = { topGroups, areaTexts, yearBills, extraGroups };
+  if (!topGroups.length) focusAreasExpanded = false;
+  paintFocusAreas();
+}
+
+function paintFocusAreas() {
+  const { topGroups, areaTexts, yearBills, extraGroups } = focusAreasState;
   ui.focusAreas.innerHTML = "";
   ui.focusAreasBar.innerHTML = "";
   if (!topGroups.length) {
     ui.focusAreasSection.hidden = true;
+    ui.focusAreasToggle.hidden = true;
     return;
   }
 
@@ -379,11 +494,11 @@ function renderFocusAreas(topGroups, areaTexts, yearBills = []) {
     }
   }
 
-  for (const [rowIndex, g] of topGroups.entries()) {
+  // Shared by both the top rows (Claude-labeled) and the expanded ones below
+  // (labeled from the bills' own titles) so the two look like one list.
+  const buildRow = (g, color, fillDesc) => {
     const li = document.createElement("li");
     li.className = "focus-area-item";
-
-    const color = CATEGORY_PALETTE[g.category] ?? "#cccccc";
 
     const key = document.createElement("div");
     key.className = "focus-area-key";
@@ -404,18 +519,27 @@ function renderFocusAreas(topGroups, areaTexts, yearBills = []) {
 
     const desc = document.createElement("div");
     desc.className = "focus-area-desc";
-    const items = Array.isArray(areaTexts?.[g.category]) ? areaTexts[g.category] : [];
-    // Shown only while .is-generating is set, so a row whose summaries failed or
-    // came back empty collapses to its reserved height rather than pulsing forever.
-    if (!items.length) desc.appendChild(buildDescSkeleton(rowIndex));
-    items.forEach((item, i) => {
-      const label = String(item.label || "").trim();
+    fillDesc(desc);
+
+    li.append(key, desc);
+    return li;
+  };
+
+  // A row's items joined with " · " separators — used identically whether the
+  // labels came from Claude or straight from a bill's own title.
+  const appendItems = (desc, items, getBill, color, category) => {
+    items.forEach((label, i) => {
       const span = document.createElement("span");
       span.className = "focus-area-list-item";
       span.textContent = i === 0 ? capitalizeFirst(label) : label;
 
-      const bill = g.bills[item.bill - 1];
-      if (bill) attachBillTooltip(span, bill, color, g.category, tooltip);
+      const bill = getBill(i);
+      if (bill) {
+        attachBillTooltip(span, bill, color, category, tooltip);
+        if (/became public law/i.test(bill.latestAction?.text || "")) {
+          span.classList.add("focus-area-list-item-law");
+        }
+      }
 
       desc.appendChild(span);
       if (i < items.length - 1) {
@@ -425,19 +549,79 @@ function renderFocusAreas(topGroups, areaTexts, yearBills = []) {
         desc.appendChild(sep);
       }
     });
+  };
 
-    li.append(key, desc);
-    ui.focusAreas.appendChild(li);
+  for (const [rowIndex, g] of topGroups.entries()) {
+    const color = CATEGORY_PALETTE[g.category] ?? "#cccccc";
+    const row = buildRow(g, color, (desc) => {
+      const items = Array.isArray(areaTexts?.[g.category]) ? areaTexts[g.category] : [];
+      // Shown only while .is-generating is set, so a row whose summaries failed
+      // or came back empty collapses to its reserved height rather than pulsing
+      // forever.
+      if (!items.length) desc.appendChild(buildDescSkeleton(rowIndex));
+      appendItems(
+        desc,
+        items.map((item) => String(item.label || "").trim()),
+        (i) => g.bills[items[i].bill - 1],
+        color,
+        g.category
+      );
+    });
+    ui.focusAreas.appendChild(row);
+  }
+
+  // Categories too small to make the top few — no Claude call for these, so
+  // they cost nothing to render and appear the instant the toggle is opened.
+  if (focusAreasExpanded) {
+    for (const g of extraGroups) {
+      const color = CATEGORY_PALETTE[g.category] ?? "#cccccc";
+      const row = buildRow(g, color, (desc) => {
+        appendItems(
+          desc,
+          g.bills.map((bill) => truncateForTooltip(makePrimaryName(bill), EXTRA_FOCUS_ITEM_MAX_CHARS)),
+          (i) => g.bills[i],
+          color,
+          g.category
+        );
+      });
+      row.classList.add("focus-area-item-extra");
+      ui.focusAreas.appendChild(row);
+    }
+  }
+
+  ui.focusAreasToggle.hidden = extraGroups.length === 0;
+  if (extraGroups.length) {
+    // No visible label, so the reason to click and the state it leaves behind
+    // both live in the accessible name rather than on-screen text.
+    ui.focusAreasToggle.setAttribute(
+      "aria-label",
+      focusAreasExpanded
+        ? "Show fewer categories"
+        : `Show ${extraGroups.length} more ${extraGroups.length === 1 ? "category" : "categories"}`
+    );
+    ui.focusAreasToggle.setAttribute("aria-expanded", String(focusAreasExpanded));
+    ui.focusAreasToggle.classList.toggle("is-expanded", focusAreasExpanded);
   }
 
   ui.focusAreasSection.hidden = false;
   dropStalePinnedTooltip();
 }
 
+// Built once — .is-expanded (toggled per paint above) rotates it via CSS rather
+// than swapping markup for an "up" version.
+ui.focusAreasToggle.innerHTML =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" ' +
+  'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
+
+ui.focusAreasToggle.addEventListener("click", () => {
+  focusAreasExpanded = !focusAreasExpanded;
+  paintFocusAreas();
+});
+
 const SHAPED_CATEGORIES = {
   "Taxation":                             { base: DOLLAR_SIGN_BASE },
   "Health":                               { base: HEALTH_CROSS_BASE },
-  "Crime and Law Enforcement":            { base: CRIME_SIREN_BASE },
+  "Crime and Law Enforcement":            { base: CRIME_BADGE_BASE },
   "Science, Technology, Communications":  { base: SCIENCE_BASE },
   "Environmental Protection":             { base: ENVIRONMENT_BASE },
   "Government Operations and Politics":   { base: BUILDING_BASE, gap: "1px" },
@@ -458,7 +642,7 @@ const SHAPED_CATEGORIES = {
   "Economics and Public Finance":         { base: ECONOMICS_CHART_BASE },
   "Emergency Management":                 { base: EMERGENCY_ALERT_BASE },
   "Families":                             { base: FAMILIES_HEART_BASE },
-  "Finance and Financial Sector":         { base: FINANCE_COINS_BASE },
+  "Finance and Financial Sector":         { base: FINANCE_BASE },
   "Foreign Trade and International Finance": { base: FOREIGN_TRADE_SHIP_BASE },
   "Law":                                  { base: LAW_SCALES_BASE },
   "Native Americans":                     { base: NATIVE_AMERICANS_BASE },
@@ -589,9 +773,13 @@ async function renderYearView(bioguideId, group) {
   const token = ++billViewToken;
   const grouped = groupBillsByPolicyArea(group.bills);
   const topGroups = grouped.slice(0, TOP_FOCUS_AREA_COUNT);
+  const extraGroups = grouped.slice(TOP_FOCUS_AREA_COUNT);
 
+  // Each year selection starts collapsed — an expansion from the last one
+  // shouldn't carry over onto bills it was never about.
+  focusAreasExpanded = false;
   // The focus-area list and its bar come straight off the bills already in hand.
-  renderFocusAreas(topGroups, null, group.bills);
+  renderFocusAreas(topGroups, null, group.bills, extraGroups);
   setFocusAreasPending(true);
   setStatus("");
 
@@ -630,9 +818,15 @@ async function renderYearView(bioguideId, group) {
   );
   const focus = track("focus areas", getFocusAreas(bioguideId, group.year, topGroups)).then(
     (areaTexts) => {
-      if (token === billViewToken && areaTexts) renderFocusAreas(topGroups, areaTexts, group.bills);
+      if (token === billViewToken && areaTexts) renderFocusAreas(topGroups, areaTexts, group.bills, extraGroups);
     }
   );
+  // Tooltips read bill._stages at hover time, same as summaries,
+  // so this needs no re-render either — just a refresh for whichever tooltip is
+  // pinned when it lands.
+  const chamberPassage = track("chamber passage", getBillsChamberPassage(group.bills)).then(() => {
+    if (token === billViewToken) refreshPinnedTooltip();
+  });
 
   // A category's pixel art is sized to its chamber-wide total, not to this member's
   // slice of it, so painting the grid before the counts land would draw every icon
@@ -644,7 +838,7 @@ async function renderYearView(bioguideId, group) {
   if (token !== billViewToken) return;
   renderGroups(grouped, totalCounts ?? null);
 
-  await Promise.all([summaries, focus, described]);
+  await Promise.all([summaries, focus, described, chamberPassage]);
   if (token !== billViewToken) return;
   setFocusAreasPending(false);
   setStatus(failed.length ? `Could not load ${failed.join(", ")}.` : "");
@@ -878,6 +1072,8 @@ async function loadBills(bioguideId) {
   ui.grid.innerHTML = "";
   ui.sessions.innerHTML = "";
   ui.focusAreasSection.hidden = true;
+  ui.focusAreasToggle.hidden = true;
+  focusAreasExpanded = false;
   setFocusAreasPending(false);
   hideBillTooltip();
   ui.memberProfile.hidden = true;
@@ -1005,6 +1201,18 @@ function clearResults() {
   ui.results.hidden = true;
 }
 
+// Senators represent a whole state and have no district to order by, so they
+// lead the list; Representatives follow in ascending district order.
+function sortMembersForDisplay(members) {
+  return [...members].sort((a, b) => {
+    const aSenate = a.chamber === "Senate";
+    const bSenate = b.chamber === "Senate";
+    if (aSenate !== bSenate) return aSenate ? -1 : 1;
+    if (aSenate) return 0;
+    return (a.district ?? 0) - (b.district ?? 0);
+  });
+}
+
 function renderResults(members) {
   ui.results.innerHTML = "";
   if (!members.length) {
@@ -1015,7 +1223,7 @@ function renderResults(members) {
     ui.results.hidden = false;
     return;
   }
-  for (const m of members) {
+  for (const m of sortMembersForDisplay(members)) {
     const li = document.createElement("li");
     const districtLabel =
       m.chamber === "Senate" ? "Senate" : m.district != null ? `District ${m.district}` : "";
@@ -1090,6 +1298,23 @@ ui.searchBtn.addEventListener("click", () => {
   clearTimeout(searchDebounceTimer);
   runSearch();
 });
+
+// Reopens an already-fetched dropdown without refetching; closes it back up on
+// a second click. If nothing has been fetched yet, runs the search current
+// field values would produce.
+ui.memberQueryToggle.addEventListener("click", () => {
+  if (!ui.results.hidden) {
+    ui.results.hidden = true;
+    return;
+  }
+  if (ui.results.children.length) {
+    ui.results.hidden = false;
+    return;
+  }
+  clearTimeout(searchDebounceTimer);
+  runSearch();
+});
+
 document.addEventListener("click", (e) => {
   // Browsing a state is a persistent roster, not a typeahead dropdown — leave it
   // up until the state is cleared or another search replaces it.
@@ -1097,7 +1322,8 @@ document.addEventListener("click", (e) => {
   if (
     !ui.results.contains(e.target) &&
     e.target !== ui.memberQuery &&
-    e.target !== ui.memberState
+    e.target !== ui.memberState &&
+    !ui.memberQueryToggle.contains(e.target)
   ) {
     clearResults();
   }

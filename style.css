@@ -132,6 +132,12 @@ select:disabled {
   margin-top: 8px;
 }
 
+/* Same [hidden] trap as below: without this the empty profile's timeline rule
+   shows before any member is picked. */
+.member-profile[hidden] {
+  display: none;
+}
+
 .member-profile-main {
   min-width: 0;
   flex: 1;

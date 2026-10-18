@@ -217,12 +217,15 @@ async function resolveCurrentCongressNumber(env) {
 }
 
 function filterMembers(members, { q, state, district }) {
-  const query = q?.trim().toLowerCase();
+  // Names are stored "Last, First M.", so match each word on its own — "Mark Warner"
+  // should find "Warner, Mark R." regardless of order or punctuation.
+  const terms = q?.trim().toLowerCase().split(/[\s,.]+/).filter(Boolean) ?? [];
   const stateQuery = state?.trim().toLowerCase();
   const districtQuery = district?.trim();
 
   return members.filter((m) => {
-    if (query && !m.name.toLowerCase().includes(query)) return false;
+    const name = m.name.toLowerCase();
+    if (terms.length && !terms.every((t) => name.includes(t))) return false;
     if (stateQuery && m.state?.toLowerCase() !== stateQuery) return false;
     if (districtQuery && String(m.district ?? "") !== districtQuery) return false;
     return true;

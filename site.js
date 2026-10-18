@@ -1328,6 +1328,3 @@ document.addEventListener("click", (e) => {
     clearResults();
   }
 });
-
-ui.memberQuery.value = "Beyer, Donald S.";
-loadBills("B001292");

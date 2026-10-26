@@ -3,12 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Track Your Congressmember</title>
+    <title>Congress for Humans</title>
     <link rel="stylesheet" href="style.css" />
   </head>
-  <body>
+  <body class="home">
     <header>
-      <h1>Track Your Congressmember</h1>
+      <h1><a href="./" class="home-link"><span class="logo-congress">congress</span><span class="logo-for">for</span><span class="logo-humans">humans</span></a></h1>
+      <div class="search">
+      <svg id="hemicycle" class="hemicycle" role="img" aria-label="535 seats of Congress"></svg>
       <div class="controls">
         <div class="member-query-wrap">
           <input id="member-query" placeholder="Search by name…" aria-label="Member name" autocomplete="off" />
@@ -83,6 +85,7 @@
         <button id="member-search-btn">Search</button>
       </div>
       <ul id="member-results" class="member-results" hidden></ul>
+      </div>
       <div id="member-profile" class="member-profile" hidden>
         <div id="member-map-panel" class="member-map-panel" hidden>
           <svg id="member-map" class="member-map" role="img"></svg>

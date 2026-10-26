@@ -1242,7 +1242,50 @@ function renderResults(members) {
   ui.results.hidden = false;
 }
 
+// Homepage seat chart: 535 dots (100 Senate + 435 House) in concentric half-rings.
+// Each ring gets seats in proportion to its radius so spacing stays even, and
+// seats are drawn in angle order so the arch fills left to right like a chamber.
+function renderHemicycle(svg, seats = 535, rows = 13) {
+  const outer = 100;
+  const inner = 40;
+  const rowGap = (outer - inner) / (rows - 1);
+  const radii = Array.from({ length: rows }, (_, i) => inner + i * rowGap);
+  const totalRadius = radii.reduce((a, b) => a + b, 0);
+
+  // Proportional allocation, then hand rounding leftovers to the outer rows.
+  const counts = radii.map((r) => Math.floor((seats * r) / totalRadius));
+  let leftover = seats - counts.reduce((a, b) => a + b, 0);
+  for (let i = rows - 1; leftover > 0; i = (i - 1 + rows) % rows, leftover--) counts[i]++;
+
+  const dots = [];
+  radii.forEach((r, i) => {
+    const n = counts[i];
+    for (let j = 0; j < n; j++) {
+      const angle = Math.PI - (Math.PI * j) / (n - 1);
+      dots.push({ angle, x: r * Math.cos(angle), y: -r * Math.sin(angle) });
+    }
+  });
+  dots.sort((a, b) => b.angle - a.angle);
+
+  const dotR = rowGap * 0.32;
+  const pad = dotR + 1;
+  svg.setAttribute("viewBox", `${-outer - pad} ${-outer - pad} ${2 * (outer + pad)} ${outer + 2 * pad}`);
+  svg.innerHTML = dots
+    .map((d) => `<circle cx="${d.x.toFixed(2)}" cy="${d.y.toFixed(2)}" r="${dotR.toFixed(2)}"></circle>`)
+    .join("");
+}
+
+renderHemicycle(document.getElementById("hemicycle"));
+
+// The homepage centers the search; it stays there through typing, Search, and
+// state/district browsing, and docks under the title for good only once a member
+// is actually picked from the results.
+function dockSearch() {
+  document.body.classList.remove("home");
+}
+
 function selectMember(member) {
+  dockSearch();
   clearResults();
   ui.memberQuery.value = member.name;
   ui.memberState.value = member.state || "";

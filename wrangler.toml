@@ -9,3 +9,8 @@ id = "096228c852ea492fadd95031a28b5e9d"
 [[kv_namespaces]]
 binding = "SUMMARY_CACHE"
 id = "09f0fe1d3ffc44ec83dae95396c906a0"
+
+[[d1_databases]]
+binding = "FEEDBACK_DB"
+database_name = "congress-feedback"
+database_id = "4bc6818d-d3ea-403d-a1b1-affac3192c26"

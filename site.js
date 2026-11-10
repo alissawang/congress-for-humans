@@ -88,7 +88,7 @@ import {
   fitShapeToCount,
 } from "./utils.js";
 import { summarizeBillsWithClaude, getFocusAreas } from "./claude-utils.js";
-import { getMemberDetails, getSponsoredLegislation, getBillDescriptions, getBillsChamberPassage, recordBillStage, emptyBillStages, CHAMBER_BY_TYPE, countBillsByPolicyArea, searchMembers } from "./congress-utils.js";
+import { getMemberDetails, getSponsoredLegislation, getBillDescriptions, getBillsChamberPassage, recordBillStage, emptyBillStages, CHAMBER_BY_TYPE, countBillsByPolicyArea, searchMembers, sendFeedback } from "./congress-utils.js";
 
 function mutedColor(hex) {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -401,6 +401,12 @@ const ui = {
   focusAreasToggle: document.getElementById("focus-areas-toggle"),
   memberMap: document.getElementById("member-map"),
   memberMapPanel: document.getElementById("member-map-panel"),
+  feedback: document.getElementById("feedback"),
+  feedbackToggle: document.getElementById("feedback-toggle"),
+  feedbackForm: document.getElementById("feedback-form"),
+  feedbackMessage: document.getElementById("feedback-message"),
+  feedbackStatus: document.getElementById("feedback-status"),
+  feedbackSend: document.getElementById("feedback-send"),
 };
 
 // Keeps the status line out of the layout entirely when it has nothing to say,
@@ -1369,5 +1375,48 @@ document.addEventListener("click", (e) => {
     !ui.memberQueryToggle.contains(e.target)
   ) {
     clearResults();
+  }
+});
+
+function setFeedbackOpen(open) {
+  ui.feedbackForm.hidden = !open;
+  ui.feedbackToggle.setAttribute("aria-expanded", String(open));
+  if (open) {
+    ui.feedbackStatus.textContent = "";
+    ui.feedbackMessage.focus();
+  }
+}
+
+ui.feedbackToggle.addEventListener("click", () => {
+  setFeedbackOpen(ui.feedbackForm.hidden);
+});
+
+document.addEventListener("click", (e) => {
+  if (!ui.feedback.contains(e.target)) setFeedbackOpen(false);
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || ui.feedbackForm.hidden) return;
+  setFeedbackOpen(false);
+  ui.feedbackToggle.focus();
+});
+
+ui.feedbackForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const message = ui.feedbackMessage.value.trim();
+  if (!message) return;
+
+  ui.feedbackSend.disabled = true;
+  ui.feedbackStatus.textContent = "";
+  try {
+    await sendFeedback(message);
+    ui.feedbackMessage.value = "";
+    ui.feedbackStatus.textContent = "Thanks for your feedback!";
+  } catch (err) {
+    // The draft stays in the box so a failed send doesn't cost them what they wrote.
+    console.error(`sendFeedback failed: ${err.message}`);
+    ui.feedbackStatus.textContent = "Couldn't send. Please try again.";
+  } finally {
+    ui.feedbackSend.disabled = false;
   }
 });

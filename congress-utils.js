@@ -203,4 +203,16 @@ async function searchMembers({ congress, q, state, district } = {}) {
   return res.json();
 }
 
-export { getMemberDetails, getSponsoredLegislation, getBillDescriptions, getBillsChamberPassage, recordBillStage, emptyBillStages, CHAMBER_BY_TYPE, countBillsByPolicyArea, searchMembers };
+async function sendFeedback(message) {
+  const res = await fetch(`${WORKER_URL}/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} ${res.statusText} | ${body.slice(0, 300)}`);
+  }
+}
+
+export { getMemberDetails, getSponsoredLegislation, getBillDescriptions, getBillsChamberPassage, recordBillStage, emptyBillStages, CHAMBER_BY_TYPE, countBillsByPolicyArea, searchMembers, sendFeedback };

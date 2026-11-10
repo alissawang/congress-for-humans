@@ -953,6 +953,29 @@ async function handleSummarize(request, env) {
   });
 }
 
+const FEEDBACK_MAX_CHARS = 2000;
+
+async function handleFeedback(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return new Response("Invalid JSON body", { status: 400, headers: CORS_HEADERS });
+  }
+
+  const message = typeof body?.message === "string" ? body.message.trim() : "";
+  if (!message || message.length > FEEDBACK_MAX_CHARS) {
+    return new Response(`Message must be 1-${FEEDBACK_MAX_CHARS} characters`, { status: 400, headers: CORS_HEADERS });
+  }
+
+  await env.FEEDBACK_DB.prepare("INSERT INTO feedback (message) VALUES (?)").bind(message).run();
+
+  return new Response(JSON.stringify({ ok: true }), {
+    status: 201,
+    headers: { "content-type": "application/json", ...CORS_HEADERS },
+  });
+}
+
 async function handleRequest(request, env, ctx) {
     const url = new URL(request.url);
 
@@ -964,6 +987,13 @@ async function handleRequest(request, env, ctx) {
       return new Response(JSON.stringify({ ok: true }), {
         headers: { "content-type": "application/json", ...CORS_HEADERS },
       });
+    }
+
+    if (url.pathname === "/feedback") {
+      if (request.method !== "POST") {
+        return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
+      }
+      return handleFeedback(request, env);
     }
 
     if (url.pathname === "/summarize") {

@@ -63,8 +63,9 @@ button.feedback-button:hover {
 /* The icon artwork has wide transparent margins, so it's oversized and clipped by the button. */
 .feedback-button img {
   flex: none;
-  width: 52px;
-  height: 52px;
+  width: 48px;
+  height: 48px;
+  margin-top: -4px;
 }
 
 .feedback-form {
@@ -89,11 +90,14 @@ button.feedback-button:hover {
 .feedback-form textarea {
   width: 100%;
   padding: 10px 12px;
-  border: 1px solid var(--border);
   border-radius: 10px;
   font-size: 14px;
   font-family: inherit;
   resize: vertical;
+}
+
+.feedback-form textarea:focus {
+  outline: none;
 }
 
 .feedback-actions {
@@ -101,6 +105,11 @@ button.feedback-button:hover {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.feedback-intro {
+  margin: 0;
+  font-size: 14px;
 }
 
 .feedback-status {
@@ -407,10 +416,11 @@ select:disabled {
 
 button {
   padding: 10px 18px;
-  border: 1px solid var(--accent);
-  background: var(--accent);
+  border: 1px solid #b4b4b4;
+  background: #b4b4b4;
   color: #fff;
   font-size: 14px;
+  font-weight: bold;
   cursor: pointer;
   border-radius: 15px;
   font-family: inherit;

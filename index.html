@@ -21,7 +21,8 @@
         <img src="assets/feedback-icon.png" alt="" />
       </button>
       <form id="feedback-form" class="feedback-form" hidden>
-        <textarea id="feedback-message" rows="5" maxlength="2000" placeholder="Share your feedback…" aria-label="Your feedback" required></textarea>
+        <p id="feedback-intro" class="feedback-intro">Requests? Corrections? Let us know!</p>
+        <textarea id="feedback-message" rows="5" maxlength="2000" placeholder="Share your feedback…" aria-label="Your feedback" aria-describedby="feedback-intro" required></textarea>
         <div class="feedback-actions">
           <span id="feedback-status" class="feedback-status" role="status"></span>
           <button id="feedback-send" type="submit">Send</button>

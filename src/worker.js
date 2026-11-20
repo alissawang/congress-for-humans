@@ -752,19 +752,30 @@ function tryParseJson(text) {
   }
 }
 
-async function generateFocusAreas(year, areas, apiKey) {
+// What the member did with the bills, for the prompt's opening line.
+const FOCUS_AREA_SUBJECTS = { sponsored: "sponsored", voted: "voted on" };
+
+// Each label costs a few dozen tokens with its JSON wrapping, so the budget grows
+// with the bill count: a fixed 500 fit four sponsored categories but would cut a
+// long list of passage votes off mid-JSON.
+const FOCUS_AREA_BASE_TOKENS = 200;
+const FOCUS_AREA_TOKENS_PER_BILL = 30;
+const FOCUS_AREA_MAX_TOKENS = 4096;
+
+async function generateFocusAreas(year, areas, apiKey, subject = "sponsored") {
   const sections = areas
     .map((a) => `[${a.category}]\n` + a.bills.map((t, i) => `${i + 1}. ${t}`).join("\n"))
     .join("\n\n");
+  const billCount = areas.reduce((sum, a) => sum + a.bills.length, 0);
 
   const body = JSON.stringify({
     model: "claude-sonnet-4-6",
-    max_tokens: 500,
+    max_tokens: Math.min(FOCUS_AREA_MAX_TOKENS, FOCUS_AREA_BASE_TOKENS + FOCUS_AREA_TOKENS_PER_BILL * billCount),
     messages: [
       {
         role: "user",
         content:
-          `Here are bills a member of Congress sponsored in ${year}, grouped by policy area:\n\n${sections}\n\n` +
+          `Here are bills a member of Congress ${FOCUS_AREA_SUBJECTS[subject]} in ${year}, grouped by policy area:\n\n${sections}\n\n` +
           "For each policy area listed above, write a short label (a few words, not a full sentence) for " +
           "EVERY bill listed in that area — not a generic restatement of the policy area's name. Every bill " +
           "number must get exactly one label; do not skip any or combine multiple bills into one label. " +
@@ -833,6 +844,64 @@ async function fingerprintAreas(areas) {
   return Array.from(new Uint8Array(digest).slice(0, 8), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// A bill keeps one label wherever it shows up — its sponsor's summary, every
+// voting member's, any year — so labels are cached per bill and only bills
+// without one go to Claude. The response has the same per-request shape as the
+// legacy path: {category: [{bill: <1-based index in that area>, label}]}.
+function billLabelCacheKey(id) {
+  return `bill-label:${id}`;
+}
+
+async function handleFocusAreasPerBill(rawAreas, year, subject, env) {
+  const ids = [...new Set(rawAreas.flatMap((a) => a.items.map((item) => item.id)))];
+  const labels = new Map();
+  await Promise.all(
+    ids.map(async (id) => {
+      const cached = await env.SUMMARY_CACHE.get(billLabelCacheKey(id));
+      if (cached) labels.set(id, cached);
+    })
+  );
+
+  const missingAreas = rawAreas
+    .map((a) => ({ category: a.category, items: a.items.filter((item) => !labels.has(item.id)) }))
+    .filter((a) => a.items.length > 0);
+
+  if (missingAreas.length) {
+    const apiKey = env.CLAUDE_API_KEY;
+    if (!apiKey) {
+      return new Response("Missing CLAUDE_API_KEY secret", { status: 500, headers: CORS_HEADERS });
+    }
+    const generated = await generateFocusAreas(
+      year,
+      missingAreas.map((a) => ({ category: a.category, bills: a.items.map((item) => item.text) })),
+      apiKey,
+      subject
+    );
+    const writes = [];
+    for (const a of missingAreas) {
+      for (const entry of Array.isArray(generated?.[a.category]) ? generated[a.category] : []) {
+        const item = a.items[Number(entry?.bill) - 1];
+        const label = typeof entry?.label === "string" ? entry.label.trim() : "";
+        if (!item || !label || labels.has(item.id)) continue;
+        labels.set(item.id, label);
+        writes.push(summaryCachePut(env, billLabelCacheKey(item.id), label));
+      }
+    }
+    await Promise.all(writes);
+  }
+
+  const areaTexts = {};
+  for (const a of rawAreas) {
+    areaTexts[a.category] = a.items
+      .map((item, i) => (labels.has(item.id) ? { bill: i + 1, label: labels.get(item.id) } : null))
+      .filter(Boolean);
+  }
+  return new Response(JSON.stringify({ areas: areaTexts }), {
+    status: 200,
+    headers: { "content-type": "application/json", ...CORS_HEADERS },
+  });
+}
+
 async function handleFocusAreas(request, env) {
   let body;
   try {
@@ -843,18 +912,36 @@ async function handleFocusAreas(request, env) {
 
   const bioguideId = typeof body?.bioguideId === "string" ? body.bioguideId : "";
   const year = Number(body?.year);
-  const areas = Array.isArray(body?.areas)
+  const subject = Object.hasOwn(FOCUS_AREA_SUBJECTS, body?.subject) ? body.subject : "sponsored";
+  // `ids`, when sent, runs parallel to `bills` (billKey() per bill). Paired up
+  // before filtering so a dropped bill can't shift every id after it.
+  const rawAreas = Array.isArray(body?.areas)
     ? body.areas
         .filter((a) => a && typeof a.category === "string" && Array.isArray(a.bills))
-        .map((a) => ({ category: a.category, bills: a.bills.filter((t) => typeof t === "string" && t) }))
-        .filter((a) => a.bills.length > 0)
+        .map((a) => {
+          const ids = Array.isArray(a.ids) && a.ids.length === a.bills.length ? a.ids : null;
+          const items = a.bills
+            .map((text, i) => ({ text, id: ids && typeof ids[i] === "string" && ids[i] ? ids[i] : null }))
+            .filter((item) => typeof item.text === "string" && item.text);
+          return { category: a.category, items };
+        })
+        .filter((a) => a.items.length > 0)
     : [];
+  const areas = rawAreas.map((a) => ({ category: a.category, bills: a.items.map((item) => item.text) }));
 
   if (!bioguideId || !Number.isInteger(year) || areas.length === 0) {
     return new Response("Missing bioguideId, year, or areas", { status: 400, headers: CORS_HEADERS });
   }
 
-  const cacheKey = `focus-areas:${bioguideId}:${year}:${await fingerprintAreas(areas)}`;
+  if (rawAreas.every((a) => a.items.every((item) => item.id))) {
+    return handleFocusAreasPerBill(rawAreas, year, subject, env);
+  }
+
+  // Clients that don't send ids get labels cached per member and bill list.
+  // Sponsored keys keep their old shape so entries cached before `subject`
+  // existed are still found.
+  const subjectKey = subject === "sponsored" ? "" : `${subject}:`;
+  const cacheKey = `focus-areas:${subjectKey}${bioguideId}:${year}:${await fingerprintAreas(areas)}`;
   const cached = await env.SUMMARY_CACHE.get(cacheKey);
   if (cached) {
     return new Response(JSON.stringify({ areas: JSON.parse(cached) }), {
@@ -868,7 +955,7 @@ async function handleFocusAreas(request, env) {
     return new Response("Missing CLAUDE_API_KEY secret", { status: 500, headers: CORS_HEADERS });
   }
 
-  const areaTexts = await generateFocusAreas(year, areas, apiKey);
+  const areaTexts = await generateFocusAreas(year, areas, apiKey, subject);
   if (Object.keys(areaTexts).length > 0) {
     await summaryCachePut(env, cacheKey, JSON.stringify(areaTexts));
   }
@@ -953,6 +1040,172 @@ async function handleSummarize(request, env) {
   });
 }
 
+// --- member votes -----------------------------------------------------------
+// Congress.gov has no per-member vote endpoint, only one roll call at a time with
+// every member's vote on it. So the cron below walks each House roll call once
+// and keeps the passage votes in D1, where a member's votes are one indexed query.
+// Roll calls within a session are numbered 1..N with no gaps, so the cursor is
+// just the highest roll number already checked.
+//
+// Senate votes aren't in the API at all (they're XML on senate.gov, keyed by LIS
+// id rather than bioguide id), so only the House is ingested for now.
+
+// Each roll call is two upstream requests (members + bill), and a cron run gets
+// a bounded number of subrequests and CPU, so the backlog drains a batch per run.
+const VOTE_INGEST_BATCH_SIZE = 10;
+
+// Final-passage questions only. "On Agreeing to the Resolution" is left out on
+// purpose: in the House nearly all of those are rules setting debate terms for
+// some other bill, not a vote on the resolution's own substance.
+const PASSAGE_QUESTION_RE =
+  /^On (Passage|Motion to Suspend the Rules and (Pass|Agree)|Motion to Concur in the Senate Amendment|Agreeing to the Conference Report)/i;
+
+// Recorded votes are tallied as Aye/No and yea-and-nay votes as Yea/Nay — the
+// same two answers either way.
+const VOTE_CAST_ALIASES = { Aye: "Yea", No: "Nay" };
+
+async function ingestHouseVotes(env) {
+  const congressNum = await resolveCurrentCongressNumber(env);
+  let budget = VOTE_INGEST_BATCH_SIZE;
+  for (const session of [1, 2]) {
+    if (budget <= 0) break;
+    try {
+      budget -= await ingestHouseSession(congressNum, session, budget, env);
+    } catch (err) {
+      // Stop rather than skip ahead: the cursor stays on the failed roll call,
+      // so the next run retries it instead of leaving a hole.
+      console.error(`house vote ingest stopped at congress ${congressNum} session ${session}: ${err.message}`);
+      break;
+    }
+  }
+}
+
+async function ingestHouseSession(congressNum, session, budget, env) {
+  // skipCache throughout: a cached count would hide new roll calls, and caching
+  // every member list would burn the KV daily write cap for data D1 already holds.
+  const list = await fetchCongressJson(`house-vote/${congressNum}/${session}`, { limit: 1 }, env, { skipCache: true });
+  const total = list?.pagination?.count ?? 0;
+
+  const cursor = await env.DB.prepare(
+    "SELECT last_roll FROM vote_ingest_cursor WHERE chamber = 'house' AND congress = ? AND session = ?"
+  ).bind(congressNum, session).first();
+
+  let roll = cursor?.last_roll ?? 0;
+  let used = 0;
+  while (roll < total && used < budget) {
+    roll++;
+    used++;
+    await ingestHouseRollCall(congressNum, session, roll, env);
+  }
+  return used;
+}
+
+async function ingestHouseRollCall(congressNum, session, roll, env) {
+  const advanceCursor = env.DB.prepare(
+    "INSERT INTO vote_ingest_cursor (chamber, congress, session, last_roll) VALUES ('house', ?, ?, ?) " +
+    "ON CONFLICT (chamber, congress, session) DO UPDATE SET last_roll = excluded.last_roll"
+  ).bind(congressNum, session, roll);
+
+  let vote = null;
+  try {
+    const page = await fetchCongressJson(`house-vote/${congressNum}/${session}/${roll}/members`, {}, env, { skipCache: true });
+    vote = page?.houseRollCallVoteMemberVotes ?? null;
+  } catch (err) {
+    // A roll number the API has no record of would otherwise block the cursor
+    // forever. Anything else (5xx, rate limit) propagates and is retried next run.
+    if (!/^Congress API 404/.test(err?.message ?? "")) throw err;
+    console.error(`house roll call ${congressNum}-${session}-${roll} not found; skipping`);
+  }
+
+  const isBillPassage =
+    vote?.legislationType && vote?.legislationNumber && PASSAGE_QUESTION_RE.test(vote.voteQuestion || "");
+  if (!isBillPassage) {
+    await advanceCursor.run();
+    return;
+  }
+
+  const billType = String(vote.legislationType).toUpperCase();
+  const billNumber = String(vote.legislationNumber);
+  // Fetched once per passage vote so the Votes tab can place bills the member
+  // didn't sponsor into a policy area. Optional: a miss just leaves it null.
+  let bill = null;
+  try {
+    const page = await fetchCongressJson(`bill/${congressNum}/${billType.toLowerCase()}/${billNumber}`, {}, env, { skipCache: true });
+    bill = page?.bill ?? null;
+  } catch (err) {
+    console.error(`bill ${congressNum}-${billType}-${billNumber} lookup failed: ${err.message}`);
+  }
+
+  const voteId = `house-${congressNum}-${session}-${roll}`;
+  const insertMemberVote = env.DB.prepare(
+    "INSERT OR REPLACE INTO member_votes (vote_id, bioguide_id, vote_cast) VALUES (?, ?, ?)"
+  );
+  const memberVotes = (Array.isArray(vote.results) ? vote.results : [])
+    .filter((r) => r?.bioguideID && r?.voteCast)
+    .map((r) => insertMemberVote.bind(voteId, r.bioguideID, VOTE_CAST_ALIASES[r.voteCast] ?? r.voteCast));
+
+  // One batch, cursor included, so a vote is either stored whole and marked
+  // checked or not at all.
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT OR REPLACE INTO votes (vote_id, chamber, congress, session, roll, date, question, vote_type, result, bill_key, bill_title, policy_area) " +
+      "VALUES (?, 'house', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(
+      voteId, congressNum, session, roll,
+      vote.startDate ?? null, vote.voteQuestion ?? null, vote.voteType ?? null, vote.result ?? null,
+      `${congressNum}-${billType}-${billNumber}`, bill?.title ?? null, bill?.policyArea?.name ?? null
+    ),
+    ...memberVotes,
+    advanceCursor,
+  ]);
+}
+
+const BIOGUIDE_ID_RE = /^[A-Z]\d{6}$/;
+const MEMBER_VOTES_MAX_AGE_SECONDS = 60 * 15; // matches the cron interval
+
+// A bill can have several passage-type votes in one chamber — a failed
+// suspension and then passage under a rule, or passage and later concurring in
+// the Senate's amendment — so each bill reports only the member's latest one.
+async function handleMemberVotes(url, env) {
+  const bioguideId = (url.searchParams.get("bioguide") || "").trim().toUpperCase();
+  const congressNum = Number(url.searchParams.get("congress"));
+  if (!BIOGUIDE_ID_RE.test(bioguideId) || !Number.isInteger(congressNum) || congressNum <= 0) {
+    return new Response("Missing or invalid bioguide/congress query parameter", { status: 400, headers: CORS_HEADERS });
+  }
+
+  const { results } = await env.DB.prepare(
+    `SELECT bill_key, vote_cast, question, result, date, session, roll, bill_title, policy_area FROM (
+       SELECT v.*, mv.vote_cast,
+              ROW_NUMBER() OVER (PARTITION BY v.bill_key ORDER BY v.session DESC, v.roll DESC) AS rn
+       FROM member_votes mv JOIN votes v ON v.vote_id = mv.vote_id
+       WHERE mv.bioguide_id = ? AND v.congress = ?
+     ) WHERE rn = 1`
+  ).bind(bioguideId, congressNum).all();
+
+  const votes = {};
+  for (const row of results) {
+    votes[row.bill_key] = {
+      cast: row.vote_cast,
+      question: row.question,
+      result: row.result,
+      date: row.date,
+      session: row.session,
+      roll: row.roll,
+      title: row.bill_title,
+      policyArea: row.policy_area,
+    };
+  }
+
+  return new Response(JSON.stringify({ congress: congressNum, votes }), {
+    status: 200,
+    headers: {
+      "content-type": "application/json",
+      "cache-control": `public, max-age=${MEMBER_VOTES_MAX_AGE_SECONDS}`,
+      ...CORS_HEADERS,
+    },
+  });
+}
+
 const FEEDBACK_MAX_CHARS = 2000;
 
 async function handleFeedback(request, env) {
@@ -968,7 +1221,7 @@ async function handleFeedback(request, env) {
     return new Response(`Message must be 1-${FEEDBACK_MAX_CHARS} characters`, { status: 400, headers: CORS_HEADERS });
   }
 
-  await env.FEEDBACK_DB.prepare("INSERT INTO feedback (message) VALUES (?)").bind(message).run();
+  await env.DB.prepare("INSERT INTO feedback (message) VALUES (?)").bind(message).run();
 
   return new Response(JSON.stringify({ ok: true }), {
     status: 201,
@@ -1029,6 +1282,13 @@ async function handleRequest(request, env, ctx) {
         return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
       }
       return handleMemberSearch(url, env, ctx);
+    }
+
+    if (url.pathname === "/member-votes") {
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
+      }
+      return handleMemberVotes(url, env);
     }
 
     if (request.method !== "GET") {
@@ -1103,5 +1363,11 @@ export default {
         headers: { "content-type": "text/plain", ...CORS_HEADERS },
       });
     }
+  },
+
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(
+      ingestHouseVotes(env).catch((err) => console.error(`house vote ingest failed: ${err?.stack || err?.message || err}`))
+    );
   },
 };

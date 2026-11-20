@@ -88,7 +88,7 @@ import {
   fitShapeToCount,
 } from "./utils.js";
 import { summarizeBillsWithClaude, getFocusAreas } from "./claude-utils.js";
-import { getMemberDetails, getSponsoredLegislation, getBillDescriptions, getBillsChamberPassage, recordBillStage, emptyBillStages, CHAMBER_BY_TYPE, countBillsByPolicyArea, searchMembers, sendFeedback } from "./congress-utils.js";
+import { getMemberDetails, getSponsoredLegislation, getBillDescriptions, getBillsChamberPassage, recordBillStage, emptyBillStages, CHAMBER_BY_TYPE, countBillsByPolicyArea, searchMembers, getMemberVotes, sendFeedback } from "./congress-utils.js";
 
 function mutedColor(hex) {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -252,6 +252,29 @@ function alignTrackerEnds(tooltip) {
   tracker.style.paddingRight = inset(last.querySelector(".tt-bill-status-label"), last.querySelector(".tt-bill-status-dot"));
 }
 
+// Only bills from the Votes tab carry `_vote` (see billsFromVotes): the member's
+// latest passage vote on the bill, with the question it was cast on — "On
+// Passage" and "Suspend the Rules and Pass" are different votes, so it's named.
+const VOTE_CAST_LABELS = { Yea: "Voted Yea", Nay: "Voted Nay", Present: "Voted Present", "Not Voting": "Did not vote" };
+// Badge color: green for Yea, red for Nay, and gray for anything that isn't a
+// position on the bill (Present, Not Voting).
+const VOTE_BADGE_CLASSES = { Yea: "is-yea", Nay: "is-nay" };
+
+function memberVoteLine(vote) {
+  const cast = VOTE_CAST_LABELS[vote.cast] || vote.cast || "No recorded vote";
+  const badgeClass = VOTE_BADGE_CLASSES[vote.cast] || "is-other";
+  const when = vote.date ? new Date(vote.date) : null;
+  const date = when && !Number.isNaN(when.getTime())
+    ? when.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+    : "";
+  const details = [vote.question, date].filter(Boolean).join(", ");
+  return (
+    `<div class="tt-vote"><span class="tt-vote-badge ${badgeClass}">${escapeHtml(cast)}</span>` +
+    (details ? ` · ${escapeHtml(details)}` : "") +
+    `</div>`
+  );
+}
+
 function attachBillTooltip(el, bill, color, category, tooltip) {
   const primary = makePrimaryName(bill);
   const secondary = makeSecondaryName(bill, primary);
@@ -278,6 +301,7 @@ function attachBillTooltip(el, bill, color, category, tooltip) {
           : escapeHtml(primary)) +
         `</div>` +
       (introduced ? `<div class="tt-date">${escapeHtml(introduced)}</div>` : "") +
+      (bill._vote ? memberVoteLine(bill._vote) : "") +
       (summary ? `<div class="tt-summary">${escapeHtml(summary)}</div>` : "") +
       (secondary ? `<div class="tt-secondary">${escapeHtml(secondary)}</div>` : "") +
       billStageTracker(bill);
@@ -387,6 +411,8 @@ const ui = {
   results: document.getElementById("member-results"),
   status: document.getElementById("status"),
   grid: document.getElementById("grid"),
+  votesGrid: document.getElementById("votes-grid"),
+  memberTabs: document.getElementById("member-tabs"),
   raw: document.getElementById("raw"),
   sessions: document.getElementById("sessions"),
   memberProfile: document.getElementById("member-profile"),
@@ -399,6 +425,11 @@ const ui = {
   focusAreasMeta: document.getElementById("focus-areas-meta"),
   focusAreasProgress: document.getElementById("focus-areas-progress"),
   focusAreasToggle: document.getElementById("focus-areas-toggle"),
+  voteAreasSection: document.getElementById("vote-areas-section"),
+  voteAreas: document.getElementById("vote-areas"),
+  voteFilters: document.getElementById("vote-filters"),
+  voteAreasMeta: document.getElementById("vote-areas-meta"),
+  voteAreasToggle: document.getElementById("vote-areas-toggle"),
   memberMap: document.getElementById("member-map"),
   memberMapPanel: document.getElementById("member-map-panel"),
   feedback: document.getElementById("feedback"),
@@ -500,77 +531,21 @@ function paintFocusAreas() {
     }
   }
 
-  // Shared by both the top rows (Claude-labeled) and the expanded ones below
-  // (labeled from the bills' own titles) so the two look like one list.
-  const buildRow = (g, color, fillDesc) => {
-    const li = document.createElement("li");
-    li.className = "focus-area-item";
-
-    const key = document.createElement("div");
-    key.className = "focus-area-key";
-
-    const dot = document.createElement("span");
-    dot.className = "focus-area-dot";
-    dot.style.backgroundColor = color;
-
-    const name = document.createElement("span");
-    name.className = "focus-area-name";
-    name.textContent = g.category;
-    const count = document.createElement("span");
-    count.className = "focus-area-count";
-    count.textContent = ` · ${g.count}`;
-    name.appendChild(count);
-
-    key.append(dot, name);
-
-    const desc = document.createElement("div");
-    desc.className = "focus-area-desc";
-    fillDesc(desc);
-
-    li.append(key, desc);
-    return li;
-  };
-
-  // A row's items joined with " · " separators — used identically whether the
-  // labels came from Claude or straight from a bill's own title.
-  const appendItems = (desc, items, getBill, color, category) => {
-    items.forEach((label, i) => {
-      const span = document.createElement("span");
-      span.className = "focus-area-list-item";
-      span.textContent = i === 0 ? capitalizeFirst(label) : label;
-
-      const bill = getBill(i);
-      if (bill) {
-        attachBillTooltip(span, bill, color, category, tooltip);
-        if (/became public law/i.test(bill.latestAction?.text || "")) {
-          span.classList.add("focus-area-list-item-law");
-        }
-      }
-
-      desc.appendChild(span);
-      if (i < items.length - 1) {
-        const sep = document.createElement("span");
-        sep.className = "focus-area-sep";
-        sep.textContent = " · ";
-        desc.appendChild(sep);
-      }
-    });
-  };
-
   for (const [rowIndex, g] of topGroups.entries()) {
     const color = CATEGORY_PALETTE[g.category] ?? "#cccccc";
-    const row = buildRow(g, color, (desc) => {
+    const row = buildFocusAreaRow(g, color, (desc) => {
       const items = Array.isArray(areaTexts?.[g.category]) ? areaTexts[g.category] : [];
       // Shown only while .is-generating is set, so a row whose summaries failed
       // or came back empty collapses to its reserved height rather than pulsing
       // forever.
       if (!items.length) desc.appendChild(buildDescSkeleton(rowIndex));
-      appendItems(
+      appendFocusAreaItems(
         desc,
         items.map((item) => String(item.label || "").trim()),
         (i) => g.bills[items[i].bill - 1],
         color,
-        g.category
+        g.category,
+        tooltip
       );
     });
     ui.focusAreas.appendChild(row);
@@ -581,13 +556,14 @@ function paintFocusAreas() {
   if (focusAreasExpanded) {
     for (const g of extraGroups) {
       const color = CATEGORY_PALETTE[g.category] ?? "#cccccc";
-      const row = buildRow(g, color, (desc) => {
-        appendItems(
+      const row = buildFocusAreaRow(g, color, (desc) => {
+        appendFocusAreaItems(
           desc,
           g.bills.map((bill) => truncateForTooltip(makePrimaryName(bill), EXTRA_FOCUS_ITEM_MAX_CHARS)),
           (i) => g.bills[i],
           color,
-          g.category
+          g.category,
+          tooltip
         );
       });
       row.classList.add("focus-area-item-extra");
@@ -595,33 +571,318 @@ function paintFocusAreas() {
     }
   }
 
-  ui.focusAreasToggle.hidden = extraGroups.length === 0;
-  if (extraGroups.length) {
-    // No visible label, so the reason to click and the state it leaves behind
-    // both live in the accessible name rather than on-screen text.
-    ui.focusAreasToggle.setAttribute(
-      "aria-label",
-      focusAreasExpanded
-        ? "Show fewer categories"
-        : `Show ${extraGroups.length} more ${extraGroups.length === 1 ? "category" : "categories"}`
-    );
-    ui.focusAreasToggle.setAttribute("aria-expanded", String(focusAreasExpanded));
-    ui.focusAreasToggle.classList.toggle("is-expanded", focusAreasExpanded);
-  }
-
+  setFocusAreasToggle(ui.focusAreasToggle, extraGroups.length, focusAreasExpanded);
   ui.focusAreasSection.hidden = false;
   dropStalePinnedTooltip();
 }
 
-// Built once — .is-expanded (toggled per paint above) rotates it via CSS rather
-// than swapping markup for an "up" version.
-ui.focusAreasToggle.innerHTML =
+// Shared by the Sponsored and Votes summaries, and within each by the top rows
+// and the expanded ones below, so they all look like one list.
+function buildFocusAreaRow(g, color, fillDesc) {
+  const li = document.createElement("li");
+  li.className = "focus-area-item";
+
+  const key = document.createElement("div");
+  key.className = "focus-area-key";
+
+  const dot = document.createElement("span");
+  dot.className = "focus-area-dot";
+  dot.style.backgroundColor = color;
+
+  const name = document.createElement("span");
+  name.className = "focus-area-name";
+  name.textContent = g.category;
+  const count = document.createElement("span");
+  count.className = "focus-area-count";
+  count.textContent = ` · ${g.count}`;
+  name.appendChild(count);
+
+  key.append(dot, name);
+
+  const desc = document.createElement("div");
+  desc.className = "focus-area-desc";
+  fillDesc(desc);
+
+  li.append(key, desc);
+  return li;
+}
+
+// A row's items joined with " · " separators — used identically whether the
+// labels came from Claude or straight from a bill's own title. `getPrefix(i)`,
+// when given, returns a node to lead item i (the Votes summary's vote mark).
+function appendFocusAreaItems(desc, items, getBill, color, category, tooltip, getPrefix = null) {
+  items.forEach((label, i) => {
+    const span = document.createElement("span");
+    span.className = "focus-area-list-item";
+    span.textContent = i === 0 ? capitalizeFirst(label) : label;
+    const prefix = getPrefix?.(i);
+    if (prefix) {
+      // Held to the label's first word, so a line never ends on a lone mark.
+      const text = span.textContent;
+      const cut = text.indexOf(" ");
+      const lead = document.createElement("span");
+      lead.className = "focus-area-item-lead";
+      lead.append(prefix, cut === -1 ? text : text.slice(0, cut));
+      span.replaceChildren(lead, cut === -1 ? "" : text.slice(cut));
+    }
+
+    const bill = getBill(i);
+    if (bill) {
+      attachBillTooltip(span, bill, color, category, tooltip);
+      if (/became public law/i.test(bill.latestAction?.text || "")) {
+        span.classList.add("focus-area-list-item-law");
+      }
+    }
+
+    desc.appendChild(span);
+    if (i < items.length - 1) {
+      const sep = document.createElement("span");
+      sep.className = "focus-area-sep";
+      sep.textContent = " · ";
+      desc.appendChild(sep);
+    }
+  });
+}
+
+function setFocusAreasToggle(toggle, extraCount, expanded) {
+  toggle.hidden = extraCount === 0;
+  if (!extraCount) return;
+  // No visible label, so the reason to click and the state it leaves behind
+  // both live in the accessible name rather than on-screen text.
+  toggle.setAttribute(
+    "aria-label",
+    expanded
+      ? "Show fewer categories"
+      : `Show ${extraCount} more ${extraCount === 1 ? "category" : "categories"}`
+  );
+  toggle.setAttribute("aria-expanded", String(expanded));
+  toggle.classList.toggle("is-expanded", expanded);
+}
+
+// Built once — .is-expanded (toggled per paint) rotates it via CSS rather than
+// swapping markup for an "up" version.
+const EXPAND_CHEVRON_ICON =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" ' +
   'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
+ui.focusAreasToggle.innerHTML = EXPAND_CHEVRON_ICON;
+ui.voteAreasToggle.innerHTML = EXPAND_CHEVRON_ICON;
 
 ui.focusAreasToggle.addEventListener("click", () => {
   focusAreasExpanded = !focusAreasExpanded;
   paintFocusAreas();
+});
+
+// --- votes by policy area ---------------------------------------------------
+// Mirrors the Sponsored summary above, over the bills the member had a passage
+// vote on. Every row is labeled from the bills' own titles (no Claude call), each
+// led by the member's vote.
+
+// Drawn rather than typed: the font's ✓ and ✗ are brush-stroked. Straight
+// segments only, in the text's own color. Present and Not Voting share the dash:
+// neither is a position on the bill.
+const VOTE_MARK_PATHS = {
+  Yea: "M2 6.5L5 9.5L10 2.5",
+  Nay: "M2.5 2.5L9.5 9.5M9.5 2.5L2.5 9.5",
+};
+const VOTE_MARK_DASH_PATH = "M2.5 6H9.5";
+
+function makeVoteMark(vote) {
+  const mark = document.createElement("span");
+  mark.className = "vote-mark";
+  mark.setAttribute("role", "img");
+  mark.setAttribute("aria-label", VOTE_CAST_LABELS[vote?.cast] || "No recorded vote");
+  mark.innerHTML =
+    `<svg viewBox="0 0 12 12" aria-hidden="true"><path d="${VOTE_MARK_PATHS[vote?.cast] ?? VOTE_MARK_DASH_PATH}"/></svg>`;
+  return mark;
+}
+
+// Votes-tab pixel art: every bill in the chamber that never went to a passage vote.
+const NO_PASSAGE_GRAY = "#e4e4e4";
+
+// Placeholder until the worker's vote ingest is deployed: Ocasio-Cortez's real
+// votes on the 119th Congress's first 60 House roll calls, shown for every
+// member. Set to null to read /member-votes instead.
+const MOCK_MEMBER_VOTES_URL = "./mock-member-votes.json";
+
+async function loadMemberVotes(bioguideId, congress) {
+  if (!MOCK_MEMBER_VOTES_URL) return getMemberVotes(bioguideId, congress);
+  const res = await fetch(MOCK_MEMBER_VOTES_URL);
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+  const { votes } = await res.json();
+  return votes || {};
+}
+
+// The /member-votes map (keyed by billKey(), "119-HR-3424") as bill objects in
+// the sponsored-legislation shape, so the bar, the rows and the tooltip — and the
+// description/summary/stage lookups that feed it — all take them as-is.
+function billsFromVotes(votes) {
+  return Object.entries(votes)
+    .map(([key, vote]) => {
+      const [congress, type, number] = key.split("-");
+      return {
+        congress: Number(congress),
+        type,
+        number,
+        title: vote.title || "",
+        policyArea: { name: vote.policyArea || "Other" },
+        _vote: vote,
+      };
+    })
+    .sort((a, b) => String(b._vote.date).localeCompare(String(a._vote.date)));
+}
+
+let voteAreasBills = [];
+let voteAreasExpanded = false;
+// The pressed filter chip ("yea", "nay", "other"), or null to show every vote.
+// One at a time: pressing a chip shows only its votes, pressing it again clears it.
+// Each view opens on Yea (see renderVoteAreas).
+let voteFilter = null;
+// The chamber-wide counts the votes grid is sized to. Undefined until they've
+// been awaited for the current view (null if they failed), so the grid isn't
+// drawn at a fraction of its size first — see renderYearView.
+let votesGridTotals;
+
+// Matches the tooltip badge: Present and Not Voting both fall under "Did not vote".
+function voteFilterKey(vote) {
+  return vote?.cast === "Yea" ? "yea" : vote?.cast === "Nay" ? "nay" : "other";
+}
+
+function filteredVoteBills() {
+  return voteFilter
+    ? voteAreasBills.filter((bill) => voteFilterKey(bill._vote) === voteFilter)
+    : voteAreasBills;
+}
+
+// Claude's short label for each voted-on bill (the same kind the Sponsored
+// summary shows), keyed by bill object. Empty until they land; rows show the
+// bill's title until then, and for any bill Claude didn't label.
+let voteLabels = new Map();
+
+// Labels come back as a single completion per request, and a member can have
+// hundreds of passage votes, so they're asked for a few categories at a time.
+const VOTE_LABEL_BATCH_BILLS = 15;
+const VOTE_LABEL_CONCURRENCY = 4;
+
+async function getVoteLabels(bioguideId, year, bills) {
+  // A category bigger than a batch is split into batch-sized slices. A full
+  // slice fills its batch alone, so one category never appears twice in a batch.
+  const batches = [];
+  let batch = [];
+  let size = 0;
+  for (const g of groupBillsByPolicyArea(bills)) {
+    for (let i = 0; i < g.bills.length; i += VOTE_LABEL_BATCH_BILLS) {
+      const slice = g.bills.slice(i, i + VOTE_LABEL_BATCH_BILLS);
+      if (batch.length && size + slice.length > VOTE_LABEL_BATCH_BILLS) {
+        batches.push(batch);
+        batch = [];
+        size = 0;
+      }
+      batch.push({ category: g.category, bills: slice });
+      size += slice.length;
+    }
+  }
+  if (batch.length) batches.push(batch);
+
+  const labels = new Map();
+  let next = 0;
+  const worker = async () => {
+    while (next < batches.length) {
+      const areas = batches[next++];
+      const texts = await getFocusAreas(bioguideId, year, areas, { subject: "voted" });
+      for (const a of areas) {
+        for (const item of Array.isArray(texts?.[a.category]) ? texts[a.category] : []) {
+          const bill = a.bills[item.bill - 1];
+          const label = String(item.label || "").trim();
+          if (bill && label) labels.set(bill, label);
+        }
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(VOTE_LABEL_CONCURRENCY, batches.length) }, worker));
+  return labels;
+}
+
+function renderVoteAreas(bills) {
+  voteAreasBills = bills;
+  voteLabels = new Map();
+  voteAreasExpanded = false;
+  // A member with no Yea votes opens on everything instead of an empty list.
+  voteFilter = bills.some((bill) => voteFilterKey(bill._vote) === "yea") ? "yea" : null;
+  paintVoteAreas();
+  paintVotesGrid();
+}
+
+// Same pixel art as Sponsored, highlighting the bills that got a passage vote —
+// narrowed by the filter chips, same as the summary above it.
+function paintVotesGrid() {
+  if (votesGridTotals === undefined) return;
+  renderGroups(groupBillsByPolicyArea(filteredVoteBills()), votesGridTotals, ui.votesGrid, NO_PASSAGE_GRAY);
+}
+
+function paintVoteAreas() {
+  const allBills = voteAreasBills;
+  const bills = filteredVoteBills();
+  ui.voteAreas.innerHTML = "";
+
+  const tooltip = getTooltipElement();
+  const groups = groupBillsByPolicyArea(bills);
+  const topGroups = groups.slice(0, TOP_FOCUS_AREA_COUNT);
+  const extraGroups = groups.slice(TOP_FOCUS_AREA_COUNT);
+
+  const plural = (n) => `${n} passage vote${n === 1 ? "" : "s"}`;
+  ui.voteAreasMeta.textContent = !allBills.length
+    ? "No passage votes found"
+    : voteFilter
+      ? `${bills.length} of ${plural(allBills.length)}`
+      : plural(allBills.length);
+
+  // Counts always reflect every vote, so a chip says what pressing it would show.
+  const castCounts = { yea: 0, nay: 0, other: 0 };
+  for (const bill of allBills) castCounts[voteFilterKey(bill._vote)]++;
+  for (const chip of ui.voteFilters.querySelectorAll(".vote-filter")) {
+    const key = chip.dataset.cast;
+    chip.querySelector(".vote-filter-count").textContent = String(castCounts[key]);
+    chip.setAttribute("aria-pressed", String(voteFilter === key));
+    chip.disabled = castCounts[key] === 0 && voteFilter !== key;
+  }
+
+  const shownGroups = voteAreasExpanded ? groups : topGroups;
+  for (const [rowIndex, g] of shownGroups.entries()) {
+    const color = CATEGORY_PALETTE[g.category] ?? "#cccccc";
+    const row = buildFocusAreaRow(g, color, (desc) => {
+      appendFocusAreaItems(
+        desc,
+        g.bills.map(
+          (bill) => voteLabels.get(bill) ?? truncateForTooltip(makePrimaryName(bill), EXTRA_FOCUS_ITEM_MAX_CHARS)
+        ),
+        (i) => g.bills[i],
+        color,
+        g.category,
+        tooltip,
+        (i) => makeVoteMark(g.bills[i]._vote)
+      );
+    });
+    if (rowIndex >= TOP_FOCUS_AREA_COUNT) row.classList.add("focus-area-item-extra");
+    ui.voteAreas.appendChild(row);
+  }
+
+  setFocusAreasToggle(ui.voteAreasToggle, extraGroups.length, voteAreasExpanded);
+  ui.voteAreasSection.hidden = false;
+  dropStalePinnedTooltip();
+}
+
+ui.voteAreasToggle.addEventListener("click", () => {
+  voteAreasExpanded = !voteAreasExpanded;
+  paintVoteAreas();
+});
+
+ui.voteFilters.addEventListener("click", (e) => {
+  const chip = e.target.closest(".vote-filter");
+  if (!chip) return;
+  const key = chip.dataset.cast;
+  voteFilter = voteFilter === key ? null : key;
+  paintVoteAreas();
+  paintVotesGrid();
 });
 
 const SHAPED_CATEGORIES = {
@@ -692,8 +953,13 @@ function fillPixelArtSquares(squares, base, gap, bills, fillerCount, color, fill
 // `totalCounts` is null until the chamber-wide counts arrive, which lets the grid
 // paint from the member's own bills alone: no filler squares, no "/ total", and
 // ordered by the member's own count until the real totals can reorder it.
-function renderGroups(groups, totalCounts = null) {
-  ui.grid.innerHTML = "";
+// `container` lets the Votes tab reuse the same pixel art; passed no groups, every
+// square is filler and the counts line shows only the chamber-wide total.
+// `fillerColor` replaces the muted category color for every filler square — the
+// Votes tab grays them out so the bills that went to a passage vote stand out.
+function renderGroups(groups, totalCounts = null, container = ui.grid, fillerColor = null) {
+  container.innerHTML = "";
+  const highlighting = groups.length > 0;
 
   const sponsoredMap = new Map(groups.map((g) => [g.category, g]));
   const allCategoryNames = new Set([
@@ -702,7 +968,9 @@ function renderGroups(groups, totalCounts = null) {
   ]);
 
   if (!allCategoryNames.size) {
-    ui.grid.innerHTML = '<div class="muted">No bills found.</div>';
+    if (highlighting || container === ui.grid) {
+      container.innerHTML = '<div class="muted">No bills found.</div>';
+    }
     return;
   }
 
@@ -725,7 +993,7 @@ function renderGroups(groups, totalCounts = null) {
 
   for (const g of allGroups) {
     const color = CATEGORY_PALETTE[g.category] ?? "#cccccc";
-    const filler = mutedColor(color);
+    const filler = fillerColor ?? mutedColor(color);
 
     const cell = document.createElement("div");
     cell.className = "policy-cell";
@@ -737,7 +1005,9 @@ function renderGroups(groups, totalCounts = null) {
 
     const counts = document.createElement("div");
     counts.className = "policy-cell-counts";
-    counts.textContent = totalCounts ? `${g.count} / ${g.total}` : String(g.count);
+    counts.textContent = !highlighting
+      ? String(g.total)
+      : totalCounts ? `${g.count} / ${g.total}` : String(g.count);
 
     const squares = document.createElement("div");
     squares.className = "policy-squares";
@@ -764,7 +1034,7 @@ function renderGroups(groups, totalCounts = null) {
     grid.appendChild(cell);
   }
 
-  ui.grid.appendChild(grid);
+  container.appendChild(grid);
   dropStalePinnedTooltip();
 }
 
@@ -777,6 +1047,10 @@ let billViewToken = 0;
 // screen while Claude is still summarizing, rather than only afterwards.
 async function renderYearView(bioguideId, group) {
   const token = ++billViewToken;
+  // Drop the last view's votes, so the grid can't repaint them under this one's
+  // counts before this view's own votes arrive.
+  voteAreasBills = [];
+  votesGridTotals = undefined;
   const grouped = groupBillsByPolicyArea(group.bills);
   const topGroups = grouped.slice(0, TOP_FOCUS_AREA_COUNT);
   const extraGroups = grouped.slice(TOP_FOCUS_AREA_COUNT);
@@ -833,6 +1107,32 @@ async function renderYearView(bioguideId, group) {
   const chamberPassage = track("chamber passage", getBillsChamberPassage(group.bills)).then(() => {
     if (token === billViewToken) refreshPinnedTooltip();
   });
+  // The Votes tab needs nothing else from this view, so it paints on its own.
+  // The Votes tab paints as soon as the votes land. Its tooltips then fill in
+  // through the same description → summary chain and stage lookup as the
+  // sponsored bills', since they read the same fields off each bill.
+  const voteBillsLoaded = track("votes", loadMemberVotes(bioguideId, group.congress)).then(
+    (memberVotes) => (memberVotes ? billsFromVotes(memberVotes) : null)
+  );
+  const votes = voteBillsLoaded.then((voteBills) => {
+    if (token !== billViewToken || !voteBills) return;
+    renderVoteAreas(voteBills);
+    const refresh = () => {
+      if (token === billViewToken) refreshPinnedTooltip();
+    };
+    return Promise.all([
+      track("vote labels", getVoteLabels(bioguideId, group.year, voteBills)).then((labels) => {
+        if (token !== billViewToken || !labels) return;
+        voteLabels = labels;
+        paintVoteAreas();
+      }),
+      track("vote bill descriptions", getBillDescriptions(voteBills))
+        .then(refresh)
+        .then(() => track("vote bill summaries", summarizeBillsWithClaude(voteBills)))
+        .then(refresh),
+      track("vote bill passage", getBillsChamberPassage(voteBills)).then(refresh),
+    ]);
+  });
 
   // A category's pixel art is sized to its chamber-wide total, not to this member's
   // slice of it, so painting the grid before the counts land would draw every icon
@@ -843,8 +1143,14 @@ async function renderYearView(bioguideId, group) {
   const totalCounts = await counts;
   if (token !== billViewToken) return;
   renderGroups(grouped, totalCounts ?? null);
+  // The votes grid can draw now that it knows its full size — once the votes
+  // themselves are in, if they aren't already (renderVoteAreas paints it then).
+  votesGridTotals = totalCounts ?? null;
+  const votesGrid = voteBillsLoaded.then((voteBills) => {
+    if (token === billViewToken && voteBills) paintVotesGrid();
+  });
 
-  await Promise.all([summaries, focus, described, chamberPassage]);
+  await Promise.all([summaries, focus, described, chamberPassage, votes, votesGrid]);
   if (token !== billViewToken) return;
   setFocusAreasPending(false);
   setStatus(failed.length ? `Could not load ${failed.join(", ")}.` : "");
@@ -1069,14 +1375,36 @@ function renderMemberProfile(member, year) {
   ui.memberFacts.textContent = facts.join(" · ");
 
   ui.memberProfile.hidden = false;
+  ui.memberTabs.hidden = false;
 }
+
+// Which panel shows is a class on <body>, so the Sponsored Bills pieces keep
+// managing their own [hidden] state without the tabs fighting over it.
+function setActiveTab(tab) {
+  document.body.classList.toggle("tab-votes", tab === "votes");
+  for (const btn of ui.memberTabs.querySelectorAll(".member-tab")) {
+    const active = btn.dataset.tab === tab;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-selected", String(active));
+  }
+  hideBillTooltip();
+}
+
+ui.memberTabs.addEventListener("click", (e) => {
+  const btn = e.target.closest(".member-tab");
+  if (btn) setActiveTab(btn.dataset.tab);
+});
 
 async function loadBills(bioguideId) {
   if (!bioguideId) return;
   setStatus("Loading bills…");
   ui.raw.textContent = "";
   ui.grid.innerHTML = "";
+  ui.votesGrid.innerHTML = "";
   ui.sessions.innerHTML = "";
+  ui.voteAreasSection.hidden = true;
+  ui.memberTabs.hidden = true;
+  setActiveTab("sponsored");
   ui.focusAreasSection.hidden = true;
   ui.focusAreasToggle.hidden = true;
   focusAreasExpanded = false;

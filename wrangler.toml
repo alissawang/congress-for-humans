@@ -11,6 +11,10 @@ binding = "SUMMARY_CACHE"
 id = "09f0fe1d3ffc44ec83dae95396c906a0"
 
 [[d1_databases]]
-binding = "FEEDBACK_DB"
+binding = "DB"
 database_name = "congress-feedback"
 database_id = "4bc6818d-d3ea-403d-a1b1-affac3192c26"
+
+# Ingests new House roll calls into D1 (see ingestHouseVotes).
+[triggers]
+crons = ["*/15 * * * *"]

@@ -203,6 +203,22 @@ async function searchMembers({ congress, q, state, district } = {}) {
   return res.json();
 }
 
+// The member's latest passage vote on each bill in a congress, keyed by billKey().
+// A bill missing from the map never reached a passage vote in their chamber.
+async function getMemberVotes(bioguideId, congress) {
+  const url = new URL(`${WORKER_URL}/member-votes`);
+  url.searchParams.set("bioguide", bioguideId);
+  url.searchParams.set("congress", String(congress));
+
+  const res = await fetch(url);
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} ${res.statusText} | ${body.slice(0, 300)}`);
+  }
+  const { votes } = await res.json();
+  return votes || {};
+}
+
 async function sendFeedback(message) {
   const res = await fetch(`${WORKER_URL}/feedback`, {
     method: "POST",
@@ -215,4 +231,4 @@ async function sendFeedback(message) {
   }
 }
 
-export { getMemberDetails, getSponsoredLegislation, getBillDescriptions, getBillsChamberPassage, recordBillStage, emptyBillStages, CHAMBER_BY_TYPE, countBillsByPolicyArea, searchMembers, sendFeedback };
+export { getMemberDetails, getSponsoredLegislation, getBillDescriptions, getBillsChamberPassage, recordBillStage, emptyBillStages, CHAMBER_BY_TYPE, countBillsByPolicyArea, searchMembers, getMemberVotes, sendFeedback };

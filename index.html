@@ -123,6 +123,10 @@
           </div>
         </div>
       </div>
+      <div id="member-tabs" class="member-tabs" role="tablist" aria-label="Member activity" hidden>
+        <button id="tab-sponsored" class="member-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="grid" data-tab="sponsored">Sponsored Bills</button>
+        <button id="tab-votes" class="member-tab" type="button" role="tab" aria-selected="false" aria-controls="vote-areas-section" data-tab="votes">Votes</button>
+      </div>
       <div id="status" class="summary" hidden></div>
       <div id="focus-areas-section" class="focus-areas-section" hidden>
         <div class="focus-areas-head">
@@ -139,10 +143,31 @@
         <ul id="focus-areas" class="focus-areas"></ul>
         <button id="focus-areas-toggle" class="focus-areas-toggle" type="button" hidden></button>
       </div>
+      <p id="votes-disclosure" class="votes-disclosure">
+        Only votes on a bill's own passage are shown. When a bill's text passes as part of a larger
+        bill, such as an omnibus or a package, the vote on that larger bill isn't counted here, so the
+        bill can look like it never got a vote.
+      </p>
+      <div id="vote-areas-section" class="focus-areas-section" hidden>
+        <div class="focus-areas-head">
+          <h2 class="focus-areas-label">Votes by Policy Area</h2>
+          <div class="focus-areas-head-meta">
+            <span id="vote-areas-meta" class="focus-areas-meta"></span>
+          </div>
+        </div>
+        <div id="vote-filters" class="vote-filters" role="group" aria-label="Show only">
+          <button type="button" class="vote-filter is-yea" data-cast="yea" aria-pressed="false">Yea <span class="vote-filter-count"></span></button>
+          <button type="button" class="vote-filter is-nay" data-cast="nay" aria-pressed="false">Nay <span class="vote-filter-count"></span></button>
+          <button type="button" class="vote-filter is-other" data-cast="other" aria-pressed="false">Did not vote <span class="vote-filter-count"></span></button>
+        </div>
+        <ul id="vote-areas" class="focus-areas"></ul>
+        <button id="vote-areas-toggle" class="focus-areas-toggle" type="button" hidden></button>
+      </div>
     </header>
 
     <main>
       <div id="grid" class="grid"></div>
+      <div id="votes-grid" class="grid"></div>
       <div id="raw" class="muted"></div>
     </main>
 

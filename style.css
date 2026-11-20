@@ -18,7 +18,7 @@ body {
   margin-left: 50px;
   margin-right: 50px;
   color: var(--ink);
-  font-family: "Public Sans", "Helvetica";
+  font-family: "Google Sans Flex", "Public Sans", "Helvetica";
   line-height: 1.4;
 }
 
@@ -434,6 +434,119 @@ main {
 
 .summary {
   font-size: 14px;
+}
+
+.member-tabs {
+  display: flex;
+  gap: 24px;
+  margin-top: 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.member-tabs[hidden] {
+  display: none;
+}
+
+button.member-tab {
+  padding: 8px 0;
+  margin-bottom: -1px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: #b4b4b4;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+button.member-tab:hover {
+  color: #6e6e6e;
+}
+
+button.member-tab.is-active {
+  color: #333333;
+  border-bottom-color: #333333;
+}
+
+/* The tab only decides which panel is on screen; each panel still sets its own
+   [hidden] for its loading state underneath. */
+body:not(.tab-votes) #vote-areas-section,
+body:not(.tab-votes) #votes-grid,
+body:not(.tab-votes) #votes-disclosure,
+body.tab-votes #focus-areas-section,
+body.tab-votes #grid {
+  display: none;
+}
+
+.votes-disclosure {
+  margin: 14px 0 0;
+  max-width: 720px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #868686;
+}
+
+/* Filter chips in the Votes summary, colored like the tooltip's vote badges:
+   outlined until pressed, filled once pressed. */
+.vote-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+button.vote-filter {
+  --vote-color: #767676;
+  padding: 4px 12px;
+  border: 1px solid var(--vote-color);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--vote-color);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+/* Same greens and reds as .tt-vote-badge. */
+button.vote-filter.is-yea {
+  --vote-color: #2e9e4f;
+}
+
+button.vote-filter.is-nay {
+  --vote-color: #d1453b;
+}
+
+button.vote-filter[aria-pressed="true"] {
+  background: var(--vote-color);
+  color: #ffffff;
+}
+
+button.vote-filter:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* The vote mark leading each bill in the Votes summary: plain strokes in the
+   text color, sized to sit on the text's x-height. */
+.vote-mark svg {
+  width: 0.75em;
+  height: 0.75em;
+  margin-right: 0.3em;
+  vertical-align: -0.02em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: butt;
+  stroke-linejoin: miter;
+}
+
+.focus-area-item-lead {
+  white-space: nowrap;
+}
+
+.vote-filter-count {
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
 }
 
 .focus-areas-section {
@@ -1145,6 +1258,37 @@ main {
   font-weight: 400;
   font-style: normal;
   margin-bottom: 8px;
+}
+
+.tt-vote {
+  color: #666;
+  font-size: 14px;
+  font-weight: 400;
+  margin-bottom: 8px;
+}
+
+.tt-vote-badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  vertical-align: 1px;
+}
+
+/* Same green as .tt-tracker's --step-reached, which is scoped to the tracker. */
+.tt-vote-badge.is-yea {
+  background: #2e9e4f;
+}
+
+.tt-vote-badge.is-nay {
+  background: #d1453b;
+}
+
+.tt-vote-badge.is-other {
+  background: #767676;
 }
 
 

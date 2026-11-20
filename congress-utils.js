@@ -1,4 +1,4 @@
-const WORKER_URL = "https://congress-api-cache.alissa-wang.workers.dev";
+const WORKER_URL = "https://api.congressforhumans.com";
 
 import { coerceList, billKey } from "./utils.js";
 
@@ -64,16 +64,16 @@ async function getSponsoredLegislation(bioguideId) {
 // opening of the bill's own text where those titles say almost nothing. Writes
 // {text, source} onto bill._description and leaves the rest untouched.
 async function getBillDescriptions(bills) {
-  const refs = bills
+  const ids = bills
     .filter((b) => b?.congress && b?.type && b?.number != null)
-    .map((b) => ({ id: billKey(b), congress: b.congress, type: b.type, number: b.number }));
-  if (!refs.length) return { checked: 0, bySource: {} };
+    .map(billKey);
+  if (!ids.length) return { checked: 0, bySource: {} };
 
-  const res = await fetch(`${WORKER_URL}/bill-descriptions`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ bills: refs }),
-  });
+  // A GET with the bill ids in the URL (not a POST body), so the browser can
+  // answer a reload of the same member and year from its cache.
+  const url = new URL(`${WORKER_URL}/bill-descriptions`);
+  url.searchParams.set("bills", ids.join(","));
+  const res = await fetch(url);
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`HTTP ${res.status} ${res.statusText} | ${body.slice(0, 300)}`);
@@ -84,7 +84,7 @@ async function getBillDescriptions(bills) {
     const found = descriptions?.[billKey(bill)];
     if (found?.text) bill._description = { text: String(found.text), source: found.source };
   }
-  return { checked: refs.length, bySource: bySource || {} };
+  return { checked: ids.length, bySource: bySource || {} };
 }
 
 // House and Senate origins are told apart by the bill type prefix alone — no

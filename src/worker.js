@@ -8,6 +8,49 @@ const CORS_HEADERS = {
 // KV writes are capped per day and can fail for reasons that have nothing to do
 // with the answer already in hand. Caching is an optimization, so a failed write
 // is logged and the request continues uncached rather than 500ing.
+// How long a browser may answer a reload from its own cache before asking again.
+// Kept well under the KV TTLs behind each endpoint, so a browser never holds data
+// longer than the worker itself would. stale-while-revalidate lets a reload paint
+// the cached copy at once while the browser refreshes it in the background.
+const BROWSER_TTL_SECONDS = 60 * 60; // 1 hour
+const BILL_DESCRIPTIONS_BROWSER_TTL_SECONDS = 60 * 60 * 6; // CRS backfills summaries over days
+// A focus-area entry is addressed by a fingerprint of the exact bills it was built
+// from, so it never goes stale — a different bill list is a different URL.
+const FOCUS_AREAS_BROWSER_TTL_SECONDS = 60 * 60 * 24 * 7;
+const STALE_WHILE_REVALIDATE_SECONDS = 60 * 60 * 24;
+
+// Only for complete 200s: an error or a partial answer must be retried on the next
+// load, not remembered by the browser or the edge.
+function cacheControl(maxAgeSeconds) {
+  return {
+    "cache-control": `public, max-age=${maxAgeSeconds}, stale-while-revalidate=${STALE_WHILE_REVALIDATE_SECONDS}`,
+  };
+}
+
+const NO_STORE = { "cache-control": "no-store" };
+
+// Cloudflare's edge cache in front of a GET handler, so a repeat request is
+// answered before the worker reads KV at all — and shared between visitors, where
+// the browser cache only helps the one who already loaded it. Whatever the handler
+// marked public is stored for its max-age. The Cache API only runs when the worker
+// is served from a custom domain; on *.workers.dev it is a silent no-op and every
+// request falls through to the handler, exactly as before.
+async function withEdgeCache(request, ctx, produce) {
+  const cache = caches.default;
+  const hit = await cache.match(request);
+  if (hit) return hit;
+
+  const response = await produce();
+  if (response.status === 200 && /\bpublic\b/.test(response.headers.get("cache-control") || "")) {
+    ctx.waitUntil(
+      cache.put(request, response.clone()).catch((err) => {
+        console.error(`edge cache put failed for ${request.url}: ${err?.message ?? err}`);
+      })
+    );
+  }
+  return response;
+}
+
 async function cachePut(env, key, value, options) {
   try {
     await env.CACHE.put(key, value, options);
@@ -253,7 +296,7 @@ async function handleMemberSearch(url, env, ctx) {
     });
     return new Response(JSON.stringify({ congress: congressNum, count: results.length, members: results }), {
       status: 200,
-      headers: { "content-type": "application/json", ...CORS_HEADERS },
+      headers: { "content-type": "application/json", ...cacheControl(BROWSER_TTL_SECONDS), ...CORS_HEADERS },
     });
   } catch (err) {
     return new Response(`Failed to search members: ${err.message}`, { status: 502, headers: CORS_HEADERS });
@@ -380,6 +423,7 @@ async function handleBillCounts(url, env, ctx) {
         "content-type": "application/json",
         "x-cache": "hit",
         ...(stale ? { "x-cache-status": "stale" } : {}),
+        ...cacheControl(BROWSER_TTL_SECONDS),
         ...CORS_HEADERS,
       },
     });
@@ -394,7 +438,9 @@ async function handleBillCounts(url, env, ctx) {
       headers: {
         "content-type": "application/json",
         "x-cache": "miss",
-        ...(result.failedMembers > 0 ? { "x-partial-failures": String(result.failedMembers) } : {}),
+        ...(result.failedMembers > 0
+          ? { "x-partial-failures": String(result.failedMembers), ...NO_STORE }
+          : cacheControl(BROWSER_TTL_SECONDS)),
         ...CORS_HEADERS,
       },
     });
@@ -633,6 +679,9 @@ async function getBillDescription(ref, env) {
   return null;
 }
 
+// The POST form takes {bills: [{id, congress, type, number}]}. The GET form packs
+// the same refs into ?bills=119-HR-1234,119-S-55 (each one its billKey), so the
+// response is addressed by URL and a reload can be answered from cache.
 async function handleBillDescriptions(request, env) {
   let body;
   try {
@@ -640,8 +689,27 @@ async function handleBillDescriptions(request, env) {
   } catch {
     return new Response("Invalid JSON body", { status: 400, headers: CORS_HEADERS });
   }
+  return describeBills(Array.isArray(body?.bills) ? body.bills : [], env, { cacheable: false });
+}
 
-  const refs = (Array.isArray(body?.bills) ? body.bills : [])
+const BILL_ID_RE = /^(\d{1,4})-([A-Za-z]{1,10})-(\d{1,7})$/;
+
+async function handleBillDescriptionsLookup(url, env) {
+  const raw = (url.searchParams.get("bills") || "").split(",").filter(Boolean);
+  const bills = raw
+    .map((id) => {
+      const m = id.match(BILL_ID_RE);
+      return m ? { id, congress: m[1], type: m[2], number: m[3] } : null;
+    })
+    .filter(Boolean);
+  if (!bills.length) {
+    return new Response("Missing or invalid bills query parameter", { status: 400, headers: CORS_HEADERS });
+  }
+  return describeBills(bills, env, { cacheable: true });
+}
+
+async function describeBills(rawRefs, env, { cacheable }) {
+  const refs = rawRefs
     .map(normalizeBillRef)
     .filter(Boolean)
     .slice(0, MAX_BILL_SUMMARY_REQUEST);
@@ -662,9 +730,11 @@ async function handleBillDescriptions(request, env) {
   const bySource = { crs: 0, titles: 0, "bill-text": 0 };
   for (const d of Object.values(descriptions)) bySource[d.source]++;
 
+  // A bill that failed would otherwise stay undescribed for the whole max-age.
+  const caching = cacheable && failed.length === 0 ? cacheControl(BILL_DESCRIPTIONS_BROWSER_TTL_SECONDS) : NO_STORE;
   return new Response(
     JSON.stringify({ descriptions, checked: refs.length, bySource, failed: failed.length }),
-    { status: 200, headers: { "content-type": "application/json", ...CORS_HEADERS } }
+    { status: 200, headers: { "content-type": "application/json", ...caching, ...CORS_HEADERS } }
   );
 }
 
@@ -827,6 +897,9 @@ async function generateFocusAreas(year, areas, apiKey) {
 // of the cache key. Keying on member+year alone meant a change in what the client
 // sends — filtering out amendments, say — kept serving labels built from the old
 // list, with no way to tell the entry was stale.
+// claude-utils.js computes the same fingerprint in the browser to look an entry up
+// by GET, so the two must stay identical. If they drift, nothing breaks: every
+// lookup just misses and falls back to the POST.
 async function fingerprintAreas(areas) {
   const canonical = JSON.stringify(areas.map((a) => [a.category, a.bills]));
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
@@ -876,6 +949,29 @@ async function handleFocusAreas(request, env) {
   return new Response(JSON.stringify({ areas: areaTexts }), {
     status: 200,
     headers: { "content-type": "application/json", ...CORS_HEADERS },
+  });
+}
+
+// The cacheable half of /focus-areas: GET ?bioguideId=&year=&fp=<fingerprint>
+// answers from KV only and never calls Claude. A miss is {areas: null}, which tells
+// the client to POST the bill list. It's marked no-store so the miss isn't
+// remembered once the POST fills the entry.
+async function handleFocusAreasLookup(url, env) {
+  const bioguideId = url.searchParams.get("bioguideId") || "";
+  const year = Number(url.searchParams.get("year"));
+  const fp = url.searchParams.get("fp") || "";
+  if (!/^[A-Z]\d{6}$/.test(bioguideId) || !Number.isInteger(year) || !/^[0-9a-f]{16}$/.test(fp)) {
+    return new Response("Missing or invalid bioguideId, year, or fp", { status: 400, headers: CORS_HEADERS });
+  }
+
+  const cached = await env.SUMMARY_CACHE.get(`focus-areas:${bioguideId}:${year}:${fp}`);
+  return new Response(JSON.stringify({ areas: cached ? JSON.parse(cached) : null }), {
+    status: 200,
+    headers: {
+      "content-type": "application/json",
+      ...(cached ? cacheControl(FOCUS_AREAS_BROWSER_TTL_SECONDS) : NO_STORE),
+      ...CORS_HEADERS,
+    },
   });
 }
 
@@ -1003,38 +1099,42 @@ async function handleRequest(request, env, ctx) {
       return handleSummarize(request, env);
     }
 
+    // POST stays supported on both of these so pages already open on the old
+    // client keep working after the worker deploys.
     if (url.pathname === "/bill-descriptions") {
-      if (request.method !== "POST") {
-        return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
-      }
-      return handleBillDescriptions(request, env);
+      if (request.method === "POST") return handleBillDescriptions(request, env);
+      if (request.method === "GET") return withEdgeCache(request, ctx, () => handleBillDescriptionsLookup(url, env));
+      return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
     }
 
     if (url.pathname === "/focus-areas") {
-      if (request.method !== "POST") {
-        return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
-      }
-      return handleFocusAreas(request, env);
+      if (request.method === "POST") return handleFocusAreas(request, env);
+      if (request.method === "GET") return withEdgeCache(request, ctx, () => handleFocusAreasLookup(url, env));
+      return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
     }
 
     if (url.pathname === "/bill-counts") {
       if (request.method !== "GET") {
         return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
       }
-      return handleBillCounts(url, env, ctx);
+      return withEdgeCache(request, ctx, () => handleBillCounts(url, env, ctx));
     }
 
     if (url.pathname === "/member-search") {
       if (request.method !== "GET") {
         return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
       }
-      return handleMemberSearch(url, env, ctx);
+      return withEdgeCache(request, ctx, () => handleMemberSearch(url, env, ctx));
     }
 
     if (request.method !== "GET") {
       return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
     }
+    return withEdgeCache(request, ctx, () => handleProxy(url, env));
+}
 
+// Passes GET ?path=<congress.gov API path> through to api.congress.gov, backed by KV.
+async function handleProxy(url, env) {
     const path = url.searchParams.get("path");
     if (!path) {
       return new Response("Missing required query parameter: path", {
@@ -1044,12 +1144,16 @@ async function handleRequest(request, env, ctx) {
     }
 
     const cacheKey = getCacheKey(url);
+    const ttlSeconds = Math.max(60, Number(url.searchParams.get("ttl")) || DEFAULT_TTL_SECONDS);
+    // A caller that asked KV for a short TTL wants fresh data, so the browser
+    // mustn't hold it any longer than KV does.
+    const browserCaching = cacheControl(Math.min(ttlSeconds, BROWSER_TTL_SECONDS));
 
     const cached = await env.CACHE.get(cacheKey);
     if (cached) {
       return new Response(cached, {
         status: 200,
-        headers: { "content-type": "application/json", "x-cache": "hit", ...CORS_HEADERS },
+        headers: { "content-type": "application/json", "x-cache": "hit", ...browserCaching, ...CORS_HEADERS },
       });
     }
 
@@ -1080,12 +1184,11 @@ async function handleRequest(request, env, ctx) {
       });
     }
 
-    const ttlSeconds = Math.max(60, Number(url.searchParams.get("ttl")) || DEFAULT_TTL_SECONDS);
     await cachePut(env, cacheKey, responseText, { expirationTtl: ttlSeconds });
 
     return new Response(responseText, {
       status: 200,
-      headers: { "content-type": "application/json", "x-cache": "miss", ...CORS_HEADERS },
+      headers: { "content-type": "application/json", "x-cache": "miss", ...browserCaching, ...CORS_HEADERS },
     });
 }
 

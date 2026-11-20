@@ -1071,8 +1071,30 @@ function renderMemberProfile(member, year) {
   ui.memberProfile.hidden = false;
 }
 
-async function loadBills(bioguideId) {
+const SITE_TITLE = "Congress for Humans";
+
+function memberDisplayName(member) {
+  return member.directOrderName || member.invertedOrderName || member.name || "";
+}
+
+// A member opened straight from a link arrives without a search behind it, so
+// the search bar is filled from their details to match what a click would show.
+function fillSearchFromMember(member) {
+  const terms = Array.isArray(member.terms) ? member.terms : [];
+  const latest = terms[terms.length - 1];
+  ui.memberQuery.value = memberDisplayName(member);
+  ui.memberState.value = member.state || "";
+  populateDistricts();
+  ui.memberDistrict.value = latest?.district != null ? String(latest.district) : "";
+}
+
+// Picking a new member while the last one is still loading (or going back and
+// forth in history) must not let the slower, older load paint over the newer.
+let memberLoadToken = 0;
+
+async function loadBills(bioguideId, { fillSearch = false } = {}) {
   if (!bioguideId) return;
+  const token = ++memberLoadToken;
   setStatus("Loading bills…");
   ui.raw.textContent = "";
   ui.grid.innerHTML = "";
@@ -1089,6 +1111,9 @@ async function loadBills(bioguideId) {
       getMemberDetails(bioguideId),
       getSponsoredLegislation(bioguideId),
     ]);
+    if (token !== memberLoadToken) return;
+    if (fillSearch) fillSearchFromMember(member);
+    document.title = `${memberDisplayName(member)} | ${SITE_TITLE}`;
     const yearGroups = groupBillsByYear(bills);
     const activeYear = yearGroups[0];
     renderMemberProfile(member, activeYear ? activeYear.year : undefined);
@@ -1101,6 +1126,7 @@ async function loadBills(bioguideId) {
     }
 
   } catch (err) {
+    if (token !== memberLoadToken) return;
     setStatus("Failed to load bills.");
     ui.raw.textContent = String(err && err.message ? err.message : err);
   }
@@ -1297,8 +1323,64 @@ function selectMember(member) {
   ui.memberState.value = member.state || "";
   populateDistricts();                                   // options first, then the value
   ui.memberDistrict.value = member.district != null ? String(member.district) : "";
+  setMemberUrl(member.bioguideId);
   loadBills(member.bioguideId);
 }
+
+// Each member has their own address, ?member=<bioguideId>, so a reload, a shared
+// link or the back button opens that member instead of the homepage. It's a query
+// string, not a path like /member/X, because the site is static files: every
+// address still serves the same index.html, with no server rewrite rules needed.
+const BIOGUIDE_ID_RE = /^[A-Z]\d{6}$/;
+
+function memberIdFromUrl() {
+  const id = (new URLSearchParams(location.search).get("member") || "").toUpperCase();
+  return BIOGUIDE_ID_RE.test(id) ? id : null;
+}
+
+function setMemberUrl(bioguideId) {
+  if (memberIdFromUrl() === bioguideId) return;
+  const url = new URL(location.href);
+  url.searchParams.set("member", bioguideId);
+  history.pushState({ member: bioguideId }, "", url);
+}
+
+// Back to the centered homepage search, with whatever member was showing (or
+// still loading) cleared away.
+function showHome() {
+  memberLoadToken++;
+  billViewToken++;
+  document.body.classList.add("home");
+  document.title = SITE_TITLE;
+  clearResults();
+  hideBillTooltip();
+  hideDistrictMap();
+  setStatus("");
+  ui.memberQuery.value = "";
+  ui.memberState.value = "";
+  populateDistricts();
+  ui.memberProfile.hidden = true;
+  ui.sessions.innerHTML = "";
+  ui.grid.innerHTML = "";
+  ui.raw.textContent = "";
+  ui.focusAreasSection.hidden = true;
+  ui.focusAreasToggle.hidden = true;
+  setFocusAreasPending(false);
+}
+
+function showMemberFromUrl() {
+  const id = memberIdFromUrl();
+  if (!id) {
+    showHome();
+    return;
+  }
+  dockSearch();
+  clearResults();
+  loadBills(id, { fillSearch: true });
+}
+
+window.addEventListener("popstate", showMemberFromUrl);
+if (memberIdFromUrl()) showMemberFromUrl();
 
 async function runSearch() {
   const q = ui.memberQuery.value.trim();

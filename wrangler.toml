@@ -2,6 +2,14 @@ name = "congress-api-cache"
 main = "src/worker.js"
 compatibility_date = "2024-09-23"
 
+# Served from api.congressforhumans.com so Cloudflare's edge cache works (it does
+# nothing on *.workers.dev). The workers.dev URL stays on for pages still open on
+# an older copy of the site.
+workers_dev = true
+routes = [
+  { pattern = "api.congressforhumans.com", custom_domain = true }
+]
+
 [[kv_namespaces]]
 binding = "CACHE"
 id = "096228c852ea492fadd95031a28b5e9d"
